@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
-import { View, Text, StyleSheet, ActivityIndicator, Alert, Button, Modal, TextInput, TouchableOpacity, ScrollView, RefreshControl, Share, Animated, StatusBar, SafeAreaView } from 'react-native';
+import { View, Text, StyleSheet, ActivityIndicator, Alert, Button, Modal, TextInput, TouchableOpacity, ScrollView, RefreshControl, Share, Animated, StatusBar, SafeAreaView, Platform } from 'react-native';
 import WebView from 'react-native-webview';
 import * as Keychain from 'react-native-keychain';
 import AsyncStorage from '@react-native-async-storage/async-storage';
@@ -7,7 +7,7 @@ import DateTimePicker from '@react-native-community/datetimepicker';
 import notifee, { AuthorizationStatus, TimestampTrigger, TriggerType } from '@notifee/react-native';
 import { parseDeadlineString } from '../utils/parser';
 import { GestureHandlerRootView, Swipeable } from 'react-native-gesture-handler';
-import Reanimated, { FadeInDown, FadeOut, LinearTransition } from 'react-native-reanimated';
+import Reanimated, { FadeInDown, FadeOut, LinearTransition, ZoomIn } from 'react-native-reanimated';
 
 const DEFAULT_HEADER = "*🚨 UPCOMING DEADLINES:*";
 const DEFAULT_ITEM = "*[{subject}]* _{desc}_\n⏳ *Due:* {date}\n⏱️ *Left:* {left}";
@@ -45,15 +45,21 @@ const DashboardScreen = ({ onLogout }) => {
   const webviewRef = useRef(null);
   const [credentials, setCredentials] = useState(null);
   const [status, setStatus] = useState('Unlocking vault...');
+  
+  // States
   const [deadlines, setDeadlines] = useState([]);
+  const [notes, setNotes] = useState([]); // ✨ NEW: Notes Array
+  
   const [refreshing, setRefreshing] = useState(false);
   const [reminderOffset, setReminderOffset] = useState('24');
-
   const [showSettings, setShowSettings] = useState(false);
   const [headerTemplate, setHeaderTemplate] = useState(DEFAULT_HEADER);
   const [itemTemplate, setItemTemplate] = useState(DEFAULT_ITEM);
   const [lastDeleted, setLastDeleted] = useState(null);
 
+  const [dividerTemplate, setDividerTemplate] = useState('\n\n〰️〰️〰️〰️〰️〰️〰️〰️〰️\n\n');
+
+  // Task Modal States
   const [showAddModal, setShowAddModal] = useState(false);
   const [newSubject, setNewSubject] = useState('');
   const [newDesc, setNewDesc] = useState('');
@@ -62,27 +68,30 @@ const DashboardScreen = ({ onLogout }) => {
   const [pickerMode, setPickerMode] = useState('date');
   const [editingIndex, setEditingIndex] = useState(null);
 
+  // ✨ NEW: Note Modal States ✨
+  const [showNoteModal, setShowNoteModal] = useState(false);
+  const [noteTopic, setNoteTopic] = useState('');
+  const [noteContent, setNoteContent] = useState('');
+  const [editingNoteId, setEditingNoteId] = useState(null);
+
   let rowRefs = new Map();
 
   useEffect(() => {
     const loadData = async () => {
-      const settings = await notifee.requestPermission();
-      if (settings.authorizationStatus >= AuthorizationStatus.AUTHORIZED) {
-        console.log('Notification permissions granted.');
-      }
+      await notifee.requestPermission();
       const creds = await Keychain.getGenericPassword();
-      if (creds) {
-        setCredentials(creds);
-        setStatus('Connecting to FEeLS...');
-      } else {
-        onLogout();
-      }
+      if (creds) { setCredentials(creds); setStatus('Connecting to FEeLS...'); } else { onLogout(); }
+      
       const savedHeader = await AsyncStorage.getItem('@header_template');
       const savedItem = await AsyncStorage.getItem('@item_template');
       const savedOffset = await AsyncStorage.getItem('@reminder_offset');
+      const savedNotes = await AsyncStorage.getItem('@saved_notes'); // ✨ LOAD NOTES
+      const savedDivider = await AsyncStorage.getItem('@divider_template');
+      
       if (savedHeader) setHeaderTemplate(savedHeader);
       if (savedItem) setItemTemplate(savedItem);
       if (savedOffset) setReminderOffset(savedOffset);
+      if (savedNotes) setNotes(JSON.parse(savedNotes));
     };
     loadData();
   }, []);
@@ -91,10 +100,51 @@ const DashboardScreen = ({ onLogout }) => {
     await AsyncStorage.setItem('@header_template', headerTemplate);
     await AsyncStorage.setItem('@item_template', itemTemplate);
     await AsyncStorage.setItem('@reminder_offset', reminderOffset);
+    await AsyncStorage.setItem('@divider_template', dividerTemplate);
     setShowSettings(false);
     Alert.alert("Saved!", "Your settings have been saved.");
+    setShowSettings(false);
   };
 
+  // ✨ NEW: Notes Logic ✨
+  const handleOpenNote = (note = null) => {
+    if (note) {
+      setEditingNoteId(note.id);
+      setNoteTopic(note.topic);
+      setNoteContent(note.content);
+    } else {
+      setEditingNoteId(null);
+      setNoteTopic('');
+      setNoteContent('');
+    }
+    setShowNoteModal(true);
+  };
+
+  const handleSaveNote = async () => {
+    if (!noteTopic.trim()) return Alert.alert("Missing Topic", "Give your note a title!");
+    
+    let updatedNotes;
+    if (editingNoteId) {
+      updatedNotes = notes.map(n => n.id === editingNoteId ? { ...n, topic: noteTopic, content: noteContent } : n);
+    } else {
+      const newNote = { id: Date.now().toString(), topic: noteTopic, content: noteContent };
+      updatedNotes = [newNote, ...notes]; // Put new notes at the front
+    }
+    
+    setNotes(updatedNotes);
+    await AsyncStorage.setItem('@saved_notes', JSON.stringify(updatedNotes));
+    setShowNoteModal(false);
+  };
+
+  const handleDeleteNote = async () => {
+    if (!editingNoteId) return setShowNoteModal(false);
+    const updatedNotes = notes.filter(n => n.id !== editingNoteId);
+    setNotes(updatedNotes);
+    await AsyncStorage.setItem('@saved_notes', JSON.stringify(updatedNotes));
+    setShowNoteModal(false);
+  };
+
+  // --- Task Logic (Unchanged) ---
   const scheduleDeadlineReminder = async (subject, description, deadlineDateString) => {
     const targetDate = parseSafeDate(deadlineDateString);
     if (isNaN(targetDate)) return;
@@ -120,10 +170,10 @@ const DashboardScreen = ({ onLogout }) => {
       try { await notifee.cancelNotification(notificationId); } catch (error) {}
   };
 
-  const handleRemoveDeadline = async (indexToRemove) => {
+  const handleRemoveDeadline = (indexToRemove) => {
     if (rowRefs.get(indexToRemove)) rowRefs.get(indexToRemove).close();
     const itemToDelete = deadlines[indexToRemove];
-    await cancelAlarm(itemToDelete.subject, itemToDelete.deadline);
+    cancelAlarm(itemToDelete.subject, itemToDelete.deadline).catch(e => {});
     setLastDeleted({ item: itemToDelete, index: indexToRemove });
     setDeadlines(prev => prev.filter((_, index) => index !== indexToRemove));
   };
@@ -143,7 +193,7 @@ const DashboardScreen = ({ onLogout }) => {
   const handleShare = async () => {
     if (deadlines.length === 0) return;
     const formattedItems = deadlines.map(d => itemTemplate.replace(/{subject}/g, d.subject).replace(/{desc}/g, d.description).replace(/{date}/g, d.deadline).replace(/{left}/g, d.remaining));
-    const shareText = `${headerTemplate}\n\n${formattedItems.join('\n\n〰️〰️〰️〰️〰️〰️〰️〰️〰️\n\n')}`;
+    const shareText = `${headerTemplate}\n\n${formattedItems.join(dividerTemplate)}`;
     try { await Share.share({ message: shareText }); } catch (error) {}
   };
 
@@ -169,7 +219,7 @@ const DashboardScreen = ({ onLogout }) => {
       setNewDesc(itemToEdit.description);
       const parsedDate = parseSafeDate(itemToEdit.deadline);
       setCustomDate(!isNaN(parsedDate) ? parsedDate : new Date());
-      setShowAddModal(true);
+      setTimeout(() => setShowAddModal(true), 150);
   };
 
   const handleSaveTask = async () => {
@@ -241,14 +291,12 @@ const DashboardScreen = ({ onLogout }) => {
 
   if (!credentials) return <ActivityIndicator style={{ flex: 1 }} size="large" />;
 
-  // ✨ HERE IS THE UPDATED RETURN BLOCK WITH SafeAreaView and StatusBar ✨
   return (
     <SafeAreaView style={styles.safeArea}>
-      <StatusBar 
-        barStyle="dark-content" 
-        backgroundColor="#f8f9fa" 
-      />
+      <StatusBar barStyle="dark-content" backgroundColor="#f8f9fa" />
       <GestureHandlerRootView style={styles.container}>
+        
+        {/* HEADER */}
         <View style={styles.headerRow}>
           <Text style={styles.title}>FEeLS</Text>
           <View style={styles.headerButtons}>
@@ -257,10 +305,10 @@ const DashboardScreen = ({ onLogout }) => {
           </View>
         </View>
         
+        {/* STATUS */}
         <View style={styles.statusBox}>
           {status === 'Deadlines Synced' || status.includes('No actionable') || status.includes('No upcoming') 
-            ? <Text style={styles.statusIcon}>✅</Text> 
-            : <ActivityIndicator size="small" color="#0066cc" style={{marginRight: 8}} />
+            ? <Text style={styles.statusIcon}>✅</Text> : <ActivityIndicator size="small" color="#0066cc" style={{marginRight: 8}} />
           }
           <Text style={styles.statusText}>{status}</Text>
         </View>
@@ -270,42 +318,53 @@ const DashboardScreen = ({ onLogout }) => {
           showsVerticalScrollIndicator={false}
           refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} colors={['#0066cc']} />}
         >
+          {/* ✨ NEW: TOPIC TILES (NOTES) SECTION ✨ */}
+          <View style={styles.notesSection}>
+            <Text style={styles.sectionTitle}>Quick Notes</Text>
+            <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.notesScrollContainer}>
+              
+              {/* Add Note Button */}
+              <TouchableOpacity style={styles.addNoteTile} onPress={() => handleOpenNote()}>
+                <Text style={styles.addNoteIcon}>+</Text>
+              </TouchableOpacity>
+
+              {/* Saved Notes */}
+              {notes.map((note) => (
+                <Reanimated.View key={note.id} entering={ZoomIn.duration(200)} layout={LinearTransition.duration(200)}>
+                  <TouchableOpacity style={styles.noteTile} onPress={() => handleOpenNote(note)}>
+                    <Text style={styles.noteTopic} numberOfLines={1}>{note.topic}</Text>
+                    <Text style={styles.noteContentPreview} numberOfLines={3}>{note.content}</Text>
+                  </TouchableOpacity>
+                </Reanimated.View>
+              ))}
+            </ScrollView>
+          </View>
+
+          <Text style={[styles.sectionTitle, {marginTop: 15, paddingHorizontal: 20}]}>Upcoming Deadlines</Text>
+
+          {/* DEADLINES LIST */}
           {deadlines.length > 0 ? (
             deadlines.map((item, index) => (
-              <Reanimated.View 
-                key={item.subject + item.deadline} 
-                style={styles.cardWrapper}
-                entering={FadeInDown.duration(200)} 
-                exiting={FadeOut.duration(150)}
-                layout={LinearTransition.duration(200)} 
-              >
+              <Reanimated.View key={item.subject + item.deadline} style={styles.cardWrapper} entering={FadeInDown.duration(200)} exiting={FadeOut.duration(150)} layout={LinearTransition.duration(200)}>
                 <Swipeable
                   ref={ref => { if (ref && !rowRefs.get(index)) { rowRefs.set(index, ref); } }}
                   renderLeftActions={(progress, dragX) => renderLeftActions(progress, dragX, index)}
                   renderRightActions={(progress, dragX) => renderRightActions(progress, dragX, index)}
                   onSwipeableLeftOpen={() => handleEditClick(index)}
                   onSwipeableRightOpen={() => handleRemoveDeadline(index)}
-                  leftThreshold={70} rightThreshold={70}
-                  overshootRight={false} overshootLeft={false}
+                  leftThreshold={70} rightThreshold={70} overshootRight={false} overshootLeft={false}
                   containerStyle={styles.swipeContainer}
                 >
                   <View style={[styles.card, getUrgencyStyle(item.deadline)]}>
                     <View style={styles.cardHeader}>
-                      <View style={styles.moduleBadge}>
-                        <Text style={styles.moduleBadgeText}>{item.subject}</Text>
-                      </View>
+                      <View style={styles.moduleBadge}><Text style={styles.moduleBadgeText}>{item.subject}</Text></View>
                     </View>
                     <Text style={styles.cardTask}>{item.description}</Text>
                     <View style={styles.cardFooter}>
-                      <View style={styles.footerItem}>
-                        <Text style={styles.footerIcon}>📅</Text>
-                        <Text style={styles.cardTime}>{item.deadline.split(' ')[0]}</Text>
-                      </View>
+                      <View style={styles.footerItem}><Text style={styles.footerIcon}>📅</Text><Text style={styles.cardTime}>{item.deadline.split(' ')[0]}</Text></View>
                       <View style={styles.footerItem}>
                         <Text style={styles.footerIcon}>⏳</Text>
-                        <Text style={[styles.cardLeft, getUrgencyStyle(item.deadline) === styles.cardOverdue && {color: '#888'}]}>
-                          {item.remaining}
-                        </Text>
+                        <Text style={[styles.cardLeft, getUrgencyStyle(item.deadline) === styles.cardOverdue && {color: '#888'}]}>{item.remaining}</Text>
                       </View>
                     </View>
                   </View>
@@ -316,22 +375,71 @@ const DashboardScreen = ({ onLogout }) => {
             <View style={styles.emptyState}>
               <Text style={styles.emptyStateIcon}>👻</Text>
               <Text style={styles.placeholderText}>No deadlines detected.</Text>
-              <Text style={styles.placeholderSub}>Pull down to refresh FEeLS data.</Text>
             </View>
           )}
         </ScrollView>
 
-        <TouchableOpacity style={styles.fab} onPress={handleOpenAdd}>
-          <Text style={styles.fabIcon}>+</Text>
-        </TouchableOpacity>
+        <TouchableOpacity style={styles.fab} onPress={handleOpenAdd}><Text style={styles.fabIcon}>+</Text></TouchableOpacity>
 
         {lastDeleted && (
-          <View style={styles.undoContainer}>
-            <Text style={styles.undoText}>Task deleted</Text>
-            <TouchableOpacity onPress={handleUndo}><Text style={styles.undoBtnText}>UNDO</Text></TouchableOpacity>
-          </View>
+          <Reanimated.View entering={FadeInDown.duration(300)} exiting={FadeOut.duration(200)} style={styles.undoWrapper}>
+            <Swipeable
+              onSwipeableOpen={() => setLastDeleted(null)} 
+              renderLeftActions={() => <View style={{ flex: 1 }} />} renderRightActions={() => <View style={{ flex: 1 }} />}
+              leftThreshold={50} rightThreshold={50}
+            >
+              <View style={styles.undoContainer}>
+                <Text style={styles.undoText}>Task deleted</Text>
+                <TouchableOpacity onPress={handleUndo}><Text style={styles.undoBtnText}>UNDO</Text></TouchableOpacity>
+              </View>
+            </Swipeable>
+          </Reanimated.View>
         )}
 
+        {/* --- ✨ NEW: NOTES MODAL ✨ --- */}
+        <Modal visible={showNoteModal} animationType="slide" transparent={true}>
+          <View style={styles.modalOverlay}>
+            <View style={[styles.modalContent, { height: '80%' }]}> 
+              <View style={styles.noteModalHeader}>
+                <Text style={styles.modalTitle}>{editingNoteId ? 'Edit Note' : 'New Note'}</Text>
+                {editingNoteId && (
+                  <TouchableOpacity onPress={handleDeleteNote} style={styles.trashBtn}>
+                    <Text style={styles.trashIcon}>🗑️</Text>
+                  </TouchableOpacity>
+                )}
+              </View>
+
+              <TextInput 
+                style={styles.noteTopicInput} 
+                value={noteTopic} 
+                onChangeText={setNoteTopic} 
+                placeholder="Topic (e.g. CO322 Passwords)" 
+                placeholderTextColor="#9ca3af"
+              />
+              
+              <TextInput 
+                style={styles.noteContentInput} 
+                value={noteContent} 
+                onChangeText={setNoteContent} 
+                placeholder="Start typing..." 
+                placeholderTextColor="#9ca3af"
+                multiline={true}
+                textAlignVertical="top"
+              />
+              
+              <View style={styles.modalButtons}>
+                <TouchableOpacity style={styles.cancelModalBtn} onPress={() => setShowNoteModal(false)}>
+                  <Text style={styles.cancelModalBtnText}>Close</Text>
+                </TouchableOpacity>
+                <TouchableOpacity style={styles.saveModalBtn} onPress={handleSaveNote}>
+                  <Text style={styles.saveModalBtnText}>Save Note</Text>
+                </TouchableOpacity>
+              </View>
+            </View>
+          </View>
+        </Modal>
+
+        {/* --- TASK MODAL --- */}
         <Modal visible={showAddModal} animationType="slide" transparent={true}>
           <View style={styles.modalOverlay}>
             <View style={styles.modalContent}>
@@ -341,28 +449,19 @@ const DashboardScreen = ({ onLogout }) => {
               <Text style={styles.inputLabel}>Description:</Text>
               <TextInput style={styles.input} value={newDesc} onChangeText={setNewDesc} placeholder="Hardware Project Report" />
               <View style={{ flexDirection: 'row', justifyContent: 'space-between', marginBottom: 20 }}>
-                <View style={{ flex: 1, marginRight: 5 }}>
-                  <Text style={styles.inputLabel}>Date:</Text>
-                  <TouchableOpacity style={styles.pickerButton} onPress={() => openPicker('date')}><Text style={styles.pickerButtonText}>{getFormattedDateString(customDate)}</Text></TouchableOpacity>
-                </View>
-                <View style={{ flex: 1, marginLeft: 5 }}>
-                  <Text style={styles.inputLabel}>Time:</Text>
-                  <TouchableOpacity style={styles.pickerButton} onPress={() => openPicker('time')}><Text style={styles.pickerButtonText}>{getFormattedTimeString(customDate)}</Text></TouchableOpacity>
-                </View>
+                <View style={{ flex: 1, marginRight: 5 }}><Text style={styles.inputLabel}>Date:</Text><TouchableOpacity style={styles.pickerButton} onPress={() => openPicker('date')}><Text style={styles.pickerButtonText}>{getFormattedDateString(customDate)}</Text></TouchableOpacity></View>
+                <View style={{ flex: 1, marginLeft: 5 }}><Text style={styles.inputLabel}>Time:</Text><TouchableOpacity style={styles.pickerButton} onPress={() => openPicker('time')}><Text style={styles.pickerButtonText}>{getFormattedTimeString(customDate)}</Text></TouchableOpacity></View>
               </View>
               {showPicker && <DateTimePicker value={customDate} mode={pickerMode} is24Hour={false} display="default" onChange={onChangePicker} />}
               <View style={styles.modalButtons}>
-                <TouchableOpacity style={styles.cancelModalBtn} onPress={() => {setShowAddModal(false); setEditingIndex(null);}}>
-                  <Text style={styles.cancelModalBtnText}>Cancel</Text>
-                </TouchableOpacity>
-                <TouchableOpacity style={styles.saveModalBtn} onPress={handleSaveTask}>
-                  <Text style={styles.saveModalBtnText}>{editingIndex !== null ? 'Save Changes' : 'Add Task'}</Text>
-                </TouchableOpacity>
+                <TouchableOpacity style={styles.cancelModalBtn} onPress={() => {setShowAddModal(false); setEditingIndex(null);}}><Text style={styles.cancelModalBtnText}>Cancel</Text></TouchableOpacity>
+                <TouchableOpacity style={styles.saveModalBtn} onPress={handleSaveTask}><Text style={styles.saveModalBtnText}>{editingIndex !== null ? 'Save Changes' : 'Add Task'}</Text></TouchableOpacity>
               </View>
             </View>
           </View>
         </Modal>
 
+        {/* --- SETTINGS MODAL --- */}
         <Modal visible={showSettings} animationType="slide" transparent={true}>
           <View style={styles.modalOverlay}>
             <View style={styles.modalContent}>
@@ -373,18 +472,20 @@ const DashboardScreen = ({ onLogout }) => {
               <TextInput style={styles.input} value={headerTemplate} onChangeText={setHeaderTemplate} />
               <Text style={styles.inputLabel}>Item Format (Share):</Text>
               <TextInput style={[styles.input, { height: 80, textAlignVertical: 'top' }]} multiline={true} value={itemTemplate} onChangeText={setItemTemplate} />
+              <Text style={styles.inputLabel}>Divider (Share):</Text>
+              <TextInput 
+                style={[styles.input, { height: 60, textAlignVertical: 'top' }]} 
+                multiline={true} 
+                value={dividerTemplate} 
+                onChangeText={setDividerTemplate} 
+                placeholder="Leave blank for no line"
+              />
               <View style={styles.modalButtons}>
-                <TouchableOpacity style={styles.cancelModalBtn} onPress={() => setShowSettings(false)}>
-                  <Text style={styles.cancelModalBtnText}>Close</Text>
-                </TouchableOpacity>
-                <TouchableOpacity style={styles.saveModalBtn} onPress={saveTemplates}>
-                  <Text style={styles.saveModalBtnText}>Save</Text>
-                </TouchableOpacity>
+                <TouchableOpacity style={styles.cancelModalBtn} onPress={() => setShowSettings(false)}><Text style={styles.cancelModalBtnText}>Close</Text></TouchableOpacity>
+                <TouchableOpacity style={styles.saveModalBtn} onPress={saveTemplates}><Text style={styles.saveModalBtnText}>Save</Text></TouchableOpacity>
               </View>
               <View style={styles.dangerZone}>
-                <TouchableOpacity onPress={onLogout} style={styles.logoutBtn}>
-                  <Text style={styles.logoutBtnText}>Logout & Clear Vault</Text>
-                </TouchableOpacity>
+                <TouchableOpacity onPress={onLogout} style={styles.logoutBtn}><Text style={styles.logoutBtnText}>Logout & Clear Vault</Text></TouchableOpacity>
               </View>
             </View>
           </View>
@@ -392,8 +493,7 @@ const DashboardScreen = ({ onLogout }) => {
 
         <View style={{ width: 0, height: 0, opacity: 0 }}>
           <WebView
-            ref={webviewRef}
-            source={{ uri: 'https://feels.pdn.ac.lk/calendar/view.php?view=upcoming' }}
+            ref={webviewRef} source={{ uri: 'https://feels.pdn.ac.lk/calendar/view.php?view=upcoming' }}
             onNavigationStateChange={(navState) => {
               const url = navState.url;
               if (navState.loading) return; 
@@ -401,8 +501,14 @@ const DashboardScreen = ({ onLogout }) => {
               else if (url.includes('my/') || url.includes('dashboard') || url === 'https://feels.pdn.ac.lk/' || url === 'https://feels.pdn.ac.lk/?' || url.includes('?redirect=')) { setStatus('Routing to calendar...'); webviewRef.current.injectJavaScript(`window.location.href = 'https://feels.pdn.ac.lk/calendar/view.php?view=upcoming';`); }
               else if (url.includes('calendar/view.php')) { setStatus('Scanning FEeLS...'); webviewRef.current.injectJavaScript(`setTimeout(function(){try{var e=document.querySelectorAll('.event, .calendar_event_course'),r=[];e.forEach(function(ev){if(ev.parentElement&&ev.parentElement.closest('.event, .calendar_event_course'))return;var t=ev.innerText.replace(/\\n/g,' ').trim();if(t&&!r.includes(t))r.push(t);});window.ReactNativeWebView.postMessage(JSON.stringify({type:'SCRAPED_DATA',data:r}));}catch(er){window.ReactNativeWebView.postMessage(JSON.stringify({type:'ERROR',message:er.message}));}},1500);true;`); }
             }}
-            onMessage={handleMessage}
-            javaScriptEnabled={true} domStorageEnabled={true} sharedCookiesEnabled={true} thirdPartyCookiesEnabled={true}
+            onMessage={handleMessage} 
+            javaScriptEnabled={true}
+            
+            incognito={true}
+            cacheEnabled={false}
+            sharedCookiesEnabled={false} 
+            thirdPartyCookiesEnabled={false}
+            domStorageEnabled={false}
           />
         </View>
       </GestureHandlerRootView>
@@ -413,7 +519,7 @@ const DashboardScreen = ({ onLogout }) => {
 const styles = StyleSheet.create({
   safeArea: { flex: 1, backgroundColor: '#f8f9fa' },
   container: { flex: 1, backgroundColor: '#f8f9fa' },
-  headerRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingHorizontal: 20, paddingBottom: 15, paddingTop: 10 },
+  headerRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingHorizontal: 20, paddingBottom: 10, paddingTop: Platform.OS === 'android' ? StatusBar.currentHeight + 15 : 10 },
   title: { fontSize: 28, fontWeight: '900', color: '#1a1a1a', letterSpacing: -0.5 },
   headerButtons: { flexDirection: 'row', alignItems: 'center' },
   iconBtn: { padding: 10, marginLeft: 5 },
@@ -421,12 +527,23 @@ const styles = StyleSheet.create({
   statusBox: { flexDirection: 'row', alignItems: 'center', backgroundColor: '#eef2ff', paddingVertical: 8, paddingHorizontal: 16, alignSelf: 'center', borderRadius: 20, marginBottom: 15 },
   statusIcon: { marginRight: 8, fontSize: 14 },
   statusText: { fontSize: 14, color: '#3730a3', fontWeight: '600' },
-  scrollPadding: { paddingHorizontal: 20, paddingBottom: 100 }, 
-  emptyState: { alignItems: 'center', marginTop: 60 },
+  
+  // ✨ NEW: Notes Styles ✨
+  sectionTitle: { fontSize: 18, fontWeight: '800', color: '#111827', marginBottom: 10, letterSpacing: -0.3 },
+  notesSection: { marginBottom: 10, paddingHorizontal: 20 },
+  notesScrollContainer: { paddingBottom: 15, paddingRight: 20 },
+  addNoteTile: { width: 130, height: 130, backgroundColor: '#f3f4f6', borderRadius: 16, borderWidth: 2, borderColor: '#e5e7eb', borderStyle: 'dashed', justifyContent: 'center', alignItems: 'center', marginRight: 15 },
+  addNoteIcon: { fontSize: 40, color: '#9ca3af', fontWeight: '300', marginTop: -5 },
+  noteTile: { width: 130, height: 130, backgroundColor: '#fff', borderRadius: 16, padding: 15, marginRight: 15, shadowColor: '#000', shadowOffset: { width: 0, height: 2 }, shadowOpacity: 0.05, shadowRadius: 5, elevation: 3 },
+  noteTopic: { fontSize: 15, fontWeight: 'bold', color: '#1f2937', marginBottom: 6 },
+  noteContentPreview: { fontSize: 13, color: '#6b7280', lineHeight: 18 },
+
+  scrollPadding: { paddingBottom: 100 }, 
+  emptyState: { alignItems: 'center', marginTop: 30 },
   emptyStateIcon: { fontSize: 50, marginBottom: 15, opacity: 0.5 },
-  placeholderText: { color: '#666', fontSize: 18, fontWeight: 'bold' },
-  placeholderSub: { color: '#999', fontSize: 14, marginTop: 5 },
-  cardWrapper: { marginBottom: 15, borderRadius: 16, backgroundColor: '#fff', shadowColor: '#000', shadowOffset: { width: 0, height: 2 }, shadowOpacity: 0.05, shadowRadius: 5, elevation: 3 },
+  placeholderText: { color: '#666', fontSize: 16, fontWeight: 'bold' },
+  
+  cardWrapper: { marginBottom: 15, borderRadius: 16, backgroundColor: '#fff', shadowColor: '#000', shadowOffset: { width: 0, height: 2 }, shadowOpacity: 0.05, shadowRadius: 5, elevation: 3, marginHorizontal: 20 },
   swipeContainer: { borderRadius: 16, overflow: 'hidden' }, 
   card: { backgroundColor: '#fff', padding: 20, borderRadius: 16 },
   cardSafe: { borderLeftWidth: 6, borderLeftColor: '#3b82f6' }, 
@@ -442,19 +559,32 @@ const styles = StyleSheet.create({
   footerIcon: { fontSize: 14, marginRight: 6 },
   cardTime: { fontSize: 13, color: '#6b7280', fontWeight: '500' },
   cardLeft: { fontSize: 13, color: '#10b981', fontWeight: '700' }, 
+  
   deleteSwipeBackground: { backgroundColor: '#ef4444', justifyContent: 'center', flex: 1 },
   editSwipeBackground: { backgroundColor: '#3b82f6', justifyContent: 'center', flex: 1 },
   deleteSwipeBtn: { alignItems: 'flex-end', paddingRight: 25, width: '100%', height: '100%', justifyContent: 'center' },
   editSwipeBtn: { alignItems: 'flex-start', paddingLeft: 25, width: '100%', height: '100%', justifyContent: 'center' },
   swipeText: { color: '#fff', fontWeight: 'bold', fontSize: 15 },
+  
   fab: { position: 'absolute', bottom: 30, right: 20, backgroundColor: '#000', width: 60, height: 60, borderRadius: 30, justifyContent: 'center', alignItems: 'center', shadowColor: '#000', shadowOffset: { width: 0, height: 4 }, shadowOpacity: 0.3, shadowRadius: 5, elevation: 8 },
   fabIcon: { color: '#fff', fontSize: 32, fontWeight: '300', marginTop: -2 },
-  undoContainer: { position: 'absolute', bottom: 30, alignSelf: 'center', backgroundColor: '#333', flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingVertical: 12, paddingHorizontal: 20, borderRadius: 25, width: '70%', elevation: 6 },
+  
+  undoWrapper: { position: 'absolute', bottom: 30, alignSelf: 'center', width: '70%', elevation: 6, shadowColor: '#000', shadowOffset: { width: 0, height: 4 }, shadowOpacity: 0.3, shadowRadius: 5 },
+  undoContainer: { backgroundColor: '#333', flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingVertical: 12, paddingHorizontal: 20, borderRadius: 25 },
   undoText: { color: '#fff', fontSize: 14 },
   undoBtnText: { color: '#fbbf24', fontWeight: 'bold', fontSize: 14 },
-  modalOverlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.4)', justifyContent: 'flex-end' },
+  
+  modalOverlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.5)', justifyContent: 'flex-end' },
   modalContent: { backgroundColor: '#fff', borderTopLeftRadius: 24, borderTopRightRadius: 24, padding: 25, paddingBottom: 40, elevation: 10 },
   modalTitle: { fontSize: 22, fontWeight: '800', marginBottom: 20, color: '#111827' },
+  
+  // ✨ NEW: Note Modal Specific Styles ✨
+  noteModalHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20 },
+  trashBtn: { padding: 5 },
+  trashIcon: { fontSize: 22 },
+  noteTopicInput: { fontSize: 24, fontWeight: 'bold', color: '#111827', marginBottom: 15, paddingBottom: 10, borderBottomWidth: 1, borderBottomColor: '#f3f4f6' },
+  noteContentInput: { flex: 1, fontSize: 16, color: '#374151', lineHeight: 24 },
+
   inputLabel: { fontSize: 13, fontWeight: '700', color: '#6b7280', marginBottom: 8, textTransform: 'uppercase' },
   input: { backgroundColor: '#f9fafb', borderWidth: 1, borderColor: '#e5e7eb', borderRadius: 12, padding: 15, marginBottom: 20, fontSize: 16, color: '#111827' },
   pickerButton: { backgroundColor: '#f9fafb', borderWidth: 1, borderColor: '#e5e7eb', borderRadius: 12, padding: 15, alignItems: 'center' },
