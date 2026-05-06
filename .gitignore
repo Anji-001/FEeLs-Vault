@@ -73,3 +73,26 @@ yarn-error.log
 !.yarn/releases
 !.yarn/sdks
 !.yarn/versions
+
+# 🛑 SECURITY & SECRETS 🛑
+*.keystore
+android/gradle.properties
+.env
+.env.*
+
+# 📦 HEAVY DEPENDENCIES 📦
+node_modules/
+ios/Pods/
+
+# 🛠️ AUTO-GENERATED BUILD FILES 🛠️
+android/app/build/
+android/.gradle/
+ios/build/
+.expo/
+
+# 💻 SYSTEM & IDE FILES 💻
+.DS_Store
+.idea/
+.vscode/
+local.properties
+*.local

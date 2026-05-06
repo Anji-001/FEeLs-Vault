@@ -8,6 +8,7 @@ import notifee, { AuthorizationStatus, TimestampTrigger, TriggerType } from '@no
 import { parseDeadlineString } from '../utils/parser';
 import { GestureHandlerRootView, Swipeable } from 'react-native-gesture-handler';
 import Reanimated, { FadeInDown, FadeOut, LinearTransition, ZoomIn } from 'react-native-reanimated';
+import BootSplash from "react-native-bootsplash";
 
 const DEFAULT_HEADER = "*🚨 UPCOMING DEADLINES:*";
 const DEFAULT_ITEM = "*[{subject}]* _{desc}_\n⏳ *Due:* {date}\n⏱️ *Left:* {left}";
@@ -92,6 +93,7 @@ const DashboardScreen = ({ onLogout }) => {
       if (savedItem) setItemTemplate(savedItem);
       if (savedOffset) setReminderOffset(savedOffset);
       if (savedNotes) setNotes(JSON.parse(savedNotes));
+
     };
     loadData();
   }, []);
@@ -255,9 +257,31 @@ const DashboardScreen = ({ onLogout }) => {
       if (parsed.type === 'SCRAPED_DATA') {
         const rawArray = parsed.data;
         if (rawArray.length > 0) {
-          const structuredData = rawArray.map(item => parseDeadlineString(item)).filter(item => !item.description.toLowerCase().includes('quiz'));
+          const structuredData = rawArray
+            .map(item => parseDeadlineString(item))
+            .filter(item => !item.description.toLowerCase().includes('quiz'))
+            // ✨ NEW: The 24-Hour Grace Period Filter ✨
+            .filter(item => {
+              const targetDate = parseSafeDate(item.deadline);
+              if (isNaN(targetDate)) return true; // Keep it if the date is weird, just to be safe
+              
+              // Calculate how many milliseconds have passed since the deadline
+              const msPastDeadline = Date.now() - targetDate.getTime();
+              const oneDayMs = 24 * 60 * 60 * 1000;
+              
+              // Only keep the task if it is LESS than 24 hours overdue
+              return msPastDeadline < oneDayMs;
+            });
+
           if (structuredData.length > 0) {
-            structuredData.sort((a, b) => parseSafeDate(a.deadline) - parseSafeDate(b.deadline));
+            // ✨ THE FIX: Prevents Hermes from crashing if a date is 'NaN' ✨
+            structuredData.sort((a, b) => {
+              const dateA = parseSafeDate(a.deadline);
+              const dateB = parseSafeDate(b.deadline);
+              const timeA = isNaN(dateA) ? 0 : dateA.getTime();
+              const timeB = isNaN(dateB) ? 0 : dateB.getTime();
+              return timeA - timeB;
+            });
             setDeadlines(structuredData);
             setStatus('Deadlines Synced'); 
             structuredData.forEach(item => scheduleDeadlineReminder(item.subject, item.description, item.deadline));
@@ -298,7 +322,7 @@ const DashboardScreen = ({ onLogout }) => {
         
         {/* HEADER */}
         <View style={styles.headerRow}>
-          <Text style={styles.title}>FEeLS</Text>
+          <Text style={styles.title}>FEeLs</Text>
           <View style={styles.headerButtons}>
             <TouchableOpacity onPress={handleShare} style={styles.iconBtn}><Text style={styles.iconBtnText}>📤</Text></TouchableOpacity>
             <TouchableOpacity onPress={() => setShowSettings(true)} style={styles.iconBtn}><Text style={styles.iconBtnText}>⚙️</Text></TouchableOpacity>
@@ -503,7 +527,7 @@ const DashboardScreen = ({ onLogout }) => {
             }}
             onMessage={handleMessage} 
             javaScriptEnabled={true}
-            
+
             incognito={true}
             cacheEnabled={false}
             sharedCookiesEnabled={false} 

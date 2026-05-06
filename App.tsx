@@ -1,12 +1,14 @@
-import React, { useEffect, useState } from 'react';
-import { SafeAreaView, StyleSheet, Text, ActivityIndicator } from 'react-native';
+import React, { useCallback, useEffect, useState } from 'react';
+import { SafeAreaView, StyleSheet } from 'react-native';
 import * as Keychain from 'react-native-keychain';
+import BootSplash from 'react-native-bootsplash';
 import LoginScreen from './src/screens/LoginScreen';
 import DashboardScreen from './src/screens/DashboardScreen';
 
 const App = () => {
   const [hasCredentials, setHasCredentials] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
+  const [isSplashHidden, setIsSplashHidden] = useState(false);
 
   useEffect(() => {
     const checkVault = async () => {
@@ -17,11 +19,26 @@ const App = () => {
         }
       } catch (error) {
         console.log("Keychain couldn't be accessed!", error);
+      } finally {
+        setIsLoading(false);
       }
-      setIsLoading(false);
     };
     checkVault();
   }, []);
+
+  const onRootLayout = useCallback(async () => {
+    if (isLoading || isSplashHidden) {
+      return;
+    }
+
+    await new Promise(resolve => requestAnimationFrame(() => resolve(null)));
+    try {
+      await BootSplash.hide({ fade: true });
+      setIsSplashHidden(true);
+    } catch (error) {
+      console.log("BootSplash couldn't be hidden!", error);
+    }
+  }, [isLoading, isSplashHidden]);
 
   const clearVault = async () => {
     await Keychain.resetGenericPassword();
@@ -29,16 +46,11 @@ const App = () => {
   };
 
   if (isLoading) {
-    return (
-      <SafeAreaView style={[styles.root, { justifyContent: 'center', alignItems: 'center' }]}>
-        <ActivityIndicator size="large" color="#0066cc" />
-        <Text style={{ marginTop: 10 }}>Checking secure vault...</Text>
-      </SafeAreaView>
-    );
+    return null;
   }
 
   return (
-    <SafeAreaView style={styles.root}>
+    <SafeAreaView style={styles.root} onLayout={onRootLayout}>
       {!hasCredentials ? (
         <LoginScreen onLoginSuccess={() => setHasCredentials(true)} />
       ) : (
