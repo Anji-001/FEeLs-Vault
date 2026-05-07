@@ -20,9 +20,11 @@
     "react-native": "0.85.2",
     "react-native-bootsplash": "^7.3.1",
     "react-native-gesture-handler": "^2.31.1",
+    "react-native-heroicons": "^4.0.0",
     "react-native-keychain": "^10.0.0",
     "react-native-reanimated": "^4.3.0",
     "react-native-safe-area-context": "^5.5.2",
+    "react-native-svg": "^15.15.4",
     "react-native-webview": "^13.16.1",
     "react-native-worklets": "^0.8.1"
   },

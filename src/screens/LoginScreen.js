@@ -1,6 +1,14 @@
 import React, { useState } from 'react';
 import { View, Text, TextInput, TouchableOpacity, StyleSheet, KeyboardAvoidingView, Platform, SafeAreaView, StatusBar, Animated } from 'react-native';
 import * as Keychain from 'react-native-keychain';
+import {
+  EyeIcon,
+  EyeSlashIcon,
+  KeyIcon,
+  LockClosedIcon,
+  ShieldCheckIcon,
+  UserIcon,
+} from 'react-native-heroicons/outline';
 
 const LoginScreen = ({ onLoginSuccess }) => {
   const [username, setUsername] = useState('');
@@ -47,7 +55,7 @@ const LoginScreen = ({ onLoginSuccess }) => {
           {/* ✨ HERO SECTION ✨ */}
           <View style={styles.heroContainer}>
             <View style={styles.iconCircle}>
-              <Text style={styles.heroIcon}>🔐</Text>
+              <LockClosedIcon size={32} color="#4f46e5" />
             </View>
             <Text style={styles.title}>FEeLS Vault</Text>
             <Text style={styles.subtitle}>Link your university account to extract deadlines automatically.</Text>
@@ -58,7 +66,7 @@ const LoginScreen = ({ onLoginSuccess }) => {
             
             {/* Username Input */}
             <View style={styles.inputWrapper}>
-              <Text style={styles.inputIcon}>👤</Text>
+              <UserIcon size={18} color="#9ca3af" style={styles.inputIcon} />
               <TextInput
                 style={styles.input}
                 placeholder="E-Number (e.g., e21xxx)"
@@ -72,7 +80,7 @@ const LoginScreen = ({ onLoginSuccess }) => {
 
             {/* Password Input */}
             <View style={styles.inputWrapper}>
-              <Text style={styles.inputIcon}>🔑</Text>
+              <KeyIcon size={18} color="#9ca3af" style={styles.inputIcon} />
               <TextInput
                 style={[styles.input, { flex: 1 }]}
                 placeholder="FEeLS Password"
@@ -84,7 +92,10 @@ const LoginScreen = ({ onLoginSuccess }) => {
               
               {/* Show/Hide Toggle */}
               <TouchableOpacity onPress={() => setShowPassword(!showPassword)} style={styles.eyeBtn}>
-                <Text style={styles.eyeIcon}>{showPassword ? '🙈' : '👁️'}</Text>
+                {showPassword
+                  ? <EyeSlashIcon size={18} color="#6b7280" />
+                  : <EyeIcon size={18} color="#6b7280" />
+                }
               </TouchableOpacity>
             </View>
           </View>
@@ -99,7 +110,7 @@ const LoginScreen = ({ onLoginSuccess }) => {
 
             {/* Security Badge */}
             <View style={styles.securityBadge}>
-              <Text style={styles.securityIcon}>🛡️</Text>
+              <ShieldCheckIcon size={16} color="#6b7280" style={styles.securityIcon} />
               <Text style={styles.securityText}>Credentials are encrypted and never leave your device.</Text>
             </View>
           </View>
@@ -118,17 +129,15 @@ const styles = StyleSheet.create({
   // Hero
   heroContainer: { alignItems: 'center', marginBottom: 40 },
   iconCircle: { width: 80, height: 80, borderRadius: 40, backgroundColor: '#eef2ff', justifyContent: 'center', alignItems: 'center', marginBottom: 20 },
-  heroIcon: { fontSize: 40 },
   title: { fontSize: 32, fontWeight: '900', color: '#111827', marginBottom: 10, letterSpacing: -0.5 },
   subtitle: { fontSize: 16, color: '#6b7280', textAlign: 'center', lineHeight: 22, paddingHorizontal: 10 },
 
   // Form
   formContainer: { width: '100%', marginBottom: 30 },
   inputWrapper: { flexDirection: 'row', alignItems: 'center', backgroundColor: '#fff', borderWidth: 1, borderColor: '#e5e7eb', borderRadius: 16, marginBottom: 15, paddingHorizontal: 15, height: 60, shadowColor: '#000', shadowOffset: { width: 0, height: 1 }, shadowOpacity: 0.05, shadowRadius: 3, elevation: 2 },
-  inputIcon: { fontSize: 20, marginRight: 10, color: '#9ca3af' },
+  inputIcon: { marginRight: 10 },
   input: { flex: 1, fontSize: 16, color: '#111827', height: '100%' },
   eyeBtn: { padding: 10 },
-  eyeIcon: { fontSize: 18, color: '#6b7280' },
 
   // Action
   actionContainer: { width: '100%', alignItems: 'center' },
@@ -137,7 +146,7 @@ const styles = StyleSheet.create({
   
   // Security Badge
   securityBadge: { flexDirection: 'row', alignItems: 'center', marginTop: 25, backgroundColor: '#f3f4f6', paddingVertical: 10, paddingHorizontal: 15, borderRadius: 12 },
-  securityIcon: { fontSize: 16, marginRight: 8 },
+  securityIcon: { marginRight: 8 },
   securityText: { fontSize: 12, color: '#6b7280', flexShrink: 1, fontWeight: '500' }
 });
 

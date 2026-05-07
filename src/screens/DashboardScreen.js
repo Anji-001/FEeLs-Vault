@@ -10,9 +10,19 @@ import { parseDeadlineString } from '../utils/parser';
 import { GestureHandlerRootView, Swipeable } from 'react-native-gesture-handler';
 import Reanimated, { FadeInDown, FadeOut, LinearTransition, ZoomIn } from 'react-native-reanimated';
 import BootSplash from "react-native-bootsplash";
+import {
+  ArchiveBoxIcon,
+  CalendarDaysIcon,
+  CheckCircleIcon,
+  ClockIcon,
+  Cog6ToothIcon,
+  PlusIcon,
+  ShareIcon,
+  TrashIcon,
+} from 'react-native-heroicons/outline';
 
-const DEFAULT_HEADER = "*🚨 UPCOMING DEADLINES:*";
-const DEFAULT_ITEM = "*[{subject}]* _{desc}_\n⏳ *Due:* {date}\n⏱️ *Left:* {left}";
+const DEFAULT_HEADER = "*UPCOMING DEADLINES:*";
+const DEFAULT_ITEM = "*[{subject}]* _{desc}_\n*Due:* {date}\n*Left:* {left}";
 const STORAGE_CUSTOM_DEADLINES = '@custom_deadlines';
 const STORAGE_CACHED_FEELS = '@cached_feels_deadlines';
 
@@ -277,7 +287,7 @@ const DashboardScreen = ({ onLogout }) => {
   const handleSaveTask = async () => {
     if (!newSubject || !newDesc) return;
     const diffMs = customDate - new Date();
-    let remaining = diffMs < 0 ? "Overdue 🚨" : `${Math.floor(diffMs / (1000 * 60 * 60 * 24))} days ${Math.floor((diffMs % (1000 * 60 * 60 * 24)) / (1000 * 60 * 60))} hours`;
+    let remaining = diffMs < 0 ? "Overdue" : `${Math.floor(diffMs / (1000 * 60 * 60 * 24))} days ${Math.floor((diffMs % (1000 * 60 * 60 * 24)) / (1000 * 60 * 60))} hours`;
     const deadlineStr = `${getFormattedDateString(customDate)} ${getFormattedTimeString(customDate)}`;
     const existingItem = editingIndex !== null ? deadlines[editingIndex] : null;
     const updatedItem = {
@@ -433,15 +443,15 @@ const DashboardScreen = ({ onLogout }) => {
         <View style={styles.headerRow}>
           <Text style={styles.title}>FEeLs</Text>
           <View style={styles.headerButtons}>
-            <TouchableOpacity onPress={handleShare} style={styles.iconBtn}><Text style={styles.iconBtnText}>📤</Text></TouchableOpacity>
-            <TouchableOpacity onPress={() => setShowSettings(true)} style={styles.iconBtn}><Text style={styles.iconBtnText}>⚙️</Text></TouchableOpacity>
+            <TouchableOpacity onPress={handleShare} style={styles.iconBtn}><ShareIcon size={28} color="#111827" /></TouchableOpacity>
+            <TouchableOpacity onPress={() => setShowSettings(true)} style={styles.iconBtn}><Cog6ToothIcon size={30} color="#111827" /></TouchableOpacity>
           </View>
         </View>
         
         {/* STATUS */}
         <View style={styles.statusBox}>
           {status === 'Deadlines Synced' || status.includes('No actionable') || status.includes('No upcoming') 
-            ? <Text style={styles.statusIcon}>✅</Text> : <ActivityIndicator size="small" color="#0066cc" style={{marginRight: 8}} />
+            ? <CheckCircleIcon size={16} color="#16a34a" style={styles.statusIcon} /> : <ActivityIndicator size="small" color="#0066cc" style={{marginRight: 8}} />
           }
           <Text style={styles.statusText}>{status}</Text>
         </View>
@@ -458,7 +468,7 @@ const DashboardScreen = ({ onLogout }) => {
               
               {/* Add Note Button */}
               <TouchableOpacity style={styles.addNoteTile} onPress={() => handleOpenNote()}>
-                <Text style={styles.addNoteIcon}>+</Text>
+                <PlusIcon size={28} color="#9ca3af" style={styles.addNoteIcon} />
               </TouchableOpacity>
 
               {/* Saved Notes */}
@@ -494,9 +504,9 @@ const DashboardScreen = ({ onLogout }) => {
                     </View>
                     <Text style={styles.cardTask}>{item.description}</Text>
                     <View style={styles.cardFooter}>
-                      <View style={styles.footerItem}><Text style={styles.footerIcon}>📅</Text><Text style={styles.cardTime}>{item.deadline.split(' ')[0]}</Text></View>
+                      <View style={styles.footerItem}><CalendarDaysIcon size={14} color="#6b7280" style={styles.footerIcon} /><Text style={styles.cardTime}>{item.deadline.split(' ')[0]}</Text></View>
                       <View style={styles.footerItem}>
-                        <Text style={styles.footerIcon}>⏳</Text>
+                        <ClockIcon size={14} color="#6b7280" style={styles.footerIcon} />
                         <Text style={[styles.cardLeft, getUrgencyStyle(item.deadline) === styles.cardOverdue && {color: '#888'}]}>{item.remaining}</Text>
                       </View>
                     </View>
@@ -506,13 +516,13 @@ const DashboardScreen = ({ onLogout }) => {
             ))
           ) : (
             <View style={styles.emptyState}>
-              <Text style={styles.emptyStateIcon}>👻</Text>
+              <ArchiveBoxIcon size={48} color="#9ca3af" style={styles.emptyStateIcon} />
               <Text style={styles.placeholderText}>No deadlines detected.</Text>
             </View>
           )}
         </ScrollView>
 
-        <TouchableOpacity style={styles.fab} onPress={handleOpenAdd}><Text style={styles.fabIcon}>+</Text></TouchableOpacity>
+        <TouchableOpacity style={styles.fab} onPress={handleOpenAdd}><PlusIcon size={28} color="#fff" /></TouchableOpacity>
 
         {lastDeleted && (
           <Reanimated.View entering={FadeInDown.duration(300)} exiting={FadeOut.duration(200)} style={styles.undoWrapper}>
@@ -537,7 +547,7 @@ const DashboardScreen = ({ onLogout }) => {
                 <Text style={styles.modalTitle}>{editingNoteId ? 'Edit Note' : 'New Note'}</Text>
                 {editingNoteId && (
                   <TouchableOpacity onPress={handleDeleteNote} style={styles.trashBtn}>
-                    <Text style={styles.trashIcon}>🗑️</Text>
+                    <TrashIcon size={20} color="#111827" />
                   </TouchableOpacity>
                 )}
               </View>
@@ -656,9 +666,8 @@ const styles = StyleSheet.create({
   title: { fontSize: 28, fontWeight: '900', color: '#1a1a1a', letterSpacing: -0.5 },
   headerButtons: { flexDirection: 'row', alignItems: 'center' },
   iconBtn: { padding: 10, marginLeft: 5 },
-  iconBtnText: { fontSize: 22 },
   statusBox: { flexDirection: 'row', alignItems: 'center', backgroundColor: '#eef2ff', paddingVertical: 8, paddingHorizontal: 16, alignSelf: 'center', borderRadius: 20, marginBottom: 15 },
-  statusIcon: { marginRight: 8, fontSize: 14 },
+  statusIcon: { marginRight: 8 },
   statusText: { fontSize: 14, color: '#3730a3', fontWeight: '600' },
   
   // ✨ NEW: Notes Styles ✨
@@ -666,14 +675,14 @@ const styles = StyleSheet.create({
   notesSection: { marginBottom: 10, paddingHorizontal: 20 },
   notesScrollContainer: { paddingBottom: 15, paddingRight: 20 },
   addNoteTile: { width: 130, height: 130, backgroundColor: '#f3f4f6', borderRadius: 16, borderWidth: 2, borderColor: '#e5e7eb', borderStyle: 'dashed', justifyContent: 'center', alignItems: 'center', marginRight: 15 },
-  addNoteIcon: { fontSize: 40, color: '#9ca3af', fontWeight: '300', marginTop: -5 },
+  addNoteIcon: { marginTop: -2 },
   noteTile: { width: 130, height: 130, backgroundColor: '#fff', borderRadius: 16, padding: 15, marginRight: 15, shadowColor: '#000', shadowOffset: { width: 0, height: 2 }, shadowOpacity: 0.05, shadowRadius: 5, elevation: 3 },
   noteTopic: { fontSize: 15, fontWeight: 'bold', color: '#1f2937', marginBottom: 6 },
   noteContentPreview: { fontSize: 13, color: '#6b7280', lineHeight: 18 },
 
   scrollPadding: { paddingBottom: 100 }, 
   emptyState: { alignItems: 'center', marginTop: 30 },
-  emptyStateIcon: { fontSize: 50, marginBottom: 15, opacity: 0.5 },
+  emptyStateIcon: { marginBottom: 15 },
   placeholderText: { color: '#666', fontSize: 16, fontWeight: 'bold' },
   
   cardWrapper: { marginBottom: 15, borderRadius: 16, backgroundColor: '#fff', shadowColor: '#000', shadowOffset: { width: 0, height: 2 }, shadowOpacity: 0.05, shadowRadius: 5, elevation: 3, marginHorizontal: 20 },
@@ -689,7 +698,7 @@ const styles = StyleSheet.create({
   cardTask: { fontSize: 18, fontWeight: '700', color: '#111827', marginBottom: 15 },
   cardFooter: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', borderTopWidth: 1, borderTopColor: '#f3f4f6', paddingTop: 12 },
   footerItem: { flexDirection: 'row', alignItems: 'center' },
-  footerIcon: { fontSize: 14, marginRight: 6 },
+  footerIcon: { marginRight: 6 },
   cardTime: { fontSize: 13, color: '#6b7280', fontWeight: '500' },
   cardLeft: { fontSize: 13, color: '#10b981', fontWeight: '700' }, 
   
@@ -700,7 +709,6 @@ const styles = StyleSheet.create({
   swipeText: { color: '#fff', fontWeight: 'bold', fontSize: 15 },
   
   fab: { position: 'absolute', bottom: 30, right: 20, backgroundColor: '#000', width: 60, height: 60, borderRadius: 30, justifyContent: 'center', alignItems: 'center', shadowColor: '#000', shadowOffset: { width: 0, height: 4 }, shadowOpacity: 0.3, shadowRadius: 5, elevation: 8 },
-  fabIcon: { color: '#fff', fontSize: 32, fontWeight: '300', marginTop: -2 },
   
   undoWrapper: { position: 'absolute', bottom: 30, alignSelf: 'center', width: '70%', elevation: 6, shadowColor: '#000', shadowOffset: { width: 0, height: 4 }, shadowOpacity: 0.3, shadowRadius: 5 },
   undoContainer: { backgroundColor: '#333', flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingVertical: 12, paddingHorizontal: 20, borderRadius: 25 },
@@ -714,7 +722,6 @@ const styles = StyleSheet.create({
   // ✨ NEW: Note Modal Specific Styles ✨
   noteModalHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20 },
   trashBtn: { padding: 5 },
-  trashIcon: { fontSize: 22 },
   noteTopicInput: { fontSize: 24, fontWeight: 'bold', color: '#111827', marginBottom: 15, paddingBottom: 10, borderBottomWidth: 1, borderBottomColor: '#f3f4f6' },
   noteContentInput: { flex: 1, fontSize: 16, color: '#374151', lineHeight: 24 },
 
