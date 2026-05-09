@@ -1,5 +1,5 @@
 export const parseDeadlineString = (rawText) => {
-  const subjectMatch = rawText.match(/(CO\d{3})/i);
+  const subjectMatch = rawText.match(/\b([A-Z]{2,4}\d{3})\b/i);
   const subject = subjectMatch ? subjectMatch[1].toUpperCase() : "General";
 
   let formattedDeadline = "Unknown Date";
