@@ -294,8 +294,12 @@ const DashboardScreen = ({ onLogout }) => {
     cancelAlarm(itemToDelete.subject, itemToDelete.deadline).catch(e => {});
     setLastDeleted({ item: itemToDelete, index: indexToRemove });
     setDeadlines(prev => prev.filter((_, index) => index !== indexToRemove));
+    
     if (itemToDelete?.source === 'custom') {
       removeCustomDeadline(itemToDelete.id);
+    } else {
+      // ✨ NEW: If it's a FEeLS task, blacklist it!
+      addToBlacklist(itemToDelete); 
     }
   };
 
@@ -355,24 +359,39 @@ const DashboardScreen = ({ onLogout }) => {
     const diffMs = customDate - new Date();
     let remaining = diffMs < 0 ? "Overdue" : `${Math.floor(diffMs / (1000 * 60 * 60 * 24))} days ${Math.floor((diffMs % (1000 * 60 * 60 * 24)) / (1000 * 60 * 60))} hours`;
     const deadlineStr = `${getFormattedDateString(customDate)} ${getFormattedTimeString(customDate)}`;
+    
     const existingItem = editingIndex !== null ? deadlines[editingIndex] : null;
+    
+    // We force the source to 'custom' so it ALWAYS saves permanently
     const updatedItem = {
       subject: newSubject.toUpperCase(),
       description: newDesc,
       deadline: deadlineStr,
       remaining: remaining,
       id: existingItem?.id || `${newSubject.toUpperCase()}-${deadlineStr}`,
-      source: existingItem?.source || 'custom',
+      source: 'custom', 
     };
 
     if (editingIndex !== null) {
         const oldItem = deadlines[editingIndex];
         await cancelAlarm(oldItem.subject, oldItem.deadline);
-        setDeadlines(prev => { const newList = [...prev]; newList[editingIndex] = updatedItem; return newList; });
-        scheduleDeadlineReminder(updatedItem.subject, updatedItem.description, updatedItem.deadline);
-        if (oldItem?.source === 'custom') {
-          await upsertCustomDeadline({ ...updatedItem, source: 'custom' });
+        
+        // ✨ NEW: Blacklist the old FEeLS version so it doesn't duplicate
+        if (oldItem?.source === 'feels') {
+           await addToBlacklist(oldItem);
         }
+        
+        setDeadlines(prev => { 
+          const newList = [...prev]; 
+          newList[editingIndex] = updatedItem; 
+          return newList; 
+        });
+        
+        scheduleDeadlineReminder(updatedItem.subject, updatedItem.description, updatedItem.deadline);
+        
+        // ✨ Unconditionally save edits to the hard drive!
+        await upsertCustomDeadline(updatedItem);
+        
     } else {
         setDeadlines(prev => {
           const newList = [...prev, updatedItem];
@@ -380,9 +399,14 @@ const DashboardScreen = ({ onLogout }) => {
           return newList;
         });
         scheduleDeadlineReminder(updatedItem.subject, updatedItem.description, updatedItem.deadline);
-        await upsertCustomDeadline({ ...updatedItem, source: 'custom' });
+        await upsertCustomDeadline(updatedItem);
     }
-    setShowAddModal(false); setNewSubject(''); setNewDesc(''); setCustomDate(new Date()); setEditingIndex(null); 
+    
+    setShowAddModal(false); 
+    setNewSubject(''); 
+    setNewDesc(''); 
+    setCustomDate(new Date()); 
+    setEditingIndex(null); 
   };
 
   const handleOpenAdd = () => { setEditingIndex(null); setNewSubject(''); setNewDesc(''); setCustomDate(new Date()); setShowAddModal(true); };
@@ -403,23 +427,28 @@ const DashboardScreen = ({ onLogout }) => {
   const handleMessage = async (event) => {
     try {
       const parsed = JSON.parse(event.nativeEvent.data);
-      // ✨ NEW: Listen for the SOS message from the WebView
+      
       if (parsed.type === 'LOGIN_FAILED') {
-        setStatus('Login Failed!');
-        setLoginError(parsed.message);
-        return; // Stop processing anything else
+        setStatus('Login Failed 🚨');
+        setLoginError(parsed.message); 
+        return; 
       }
 
       if (parsed.type === 'SCRAPED_DATA') {
         
-        // 1. ✨ FETCH CUSTOM DEADLINES FROM STORAGE FIRST ✨
-        const savedCustomStr = await AsyncStorage.getItem(STORAGE_CUSTOM_DEADLINES);
+        // 1. FETCH CUSTOM DEADLINES AND THE BLACKLIST
+        const [savedCustomStr, savedHiddenStr] = await Promise.all([
+          AsyncStorage.getItem(STORAGE_CUSTOM_DEADLINES),
+          AsyncStorage.getItem('@hidden_feels_tasks')
+        ]);
+        
         const customDeadlines = normalizeCustomDeadlines(savedCustomStr ? JSON.parse(savedCustomStr) : []);
+        const hiddenList = savedHiddenStr ? JSON.parse(savedHiddenStr) : [];
         
         const rawArray = parsed.data || [];
         let structuredData = [];
 
-        // 2. Process FEeLS data if there is any
+        // 2. Process FEeLS data
         if (rawArray.length > 0) {
           structuredData = rawArray
             .map(item => parseDeadlineString(item))
@@ -432,14 +461,18 @@ const DashboardScreen = ({ onLogout }) => {
             });
         }
 
-        const feelsDeadlines = normalizeFeelsDeadlines(structuredData);
+        // 3. ✨ FILTER OUT BLACKLISTED TASKS ✨
+        const feelsDeadlines = normalizeFeelsDeadlines(structuredData).filter(item => {
+           const signature = `${item.subject}-${item.description}`;
+           return !hiddenList.includes(signature); // Toss it out if you already edited it!
+        });
 
         await AsyncStorage.setItem(STORAGE_CACHED_FEELS, JSON.stringify(feelsDeadlines));
 
-        // 3. ✨ COMBINE SCRAPED DATA WITH CUSTOM DATA ✨
+        // 4. COMBINE SCRAPED DATA WITH CUSTOM DATA
         const combinedData = [...feelsDeadlines, ...customDeadlines];
 
-        // 4. Sort and display the combined list
+        // 5. Sort and display
         if (combinedData.length > 0) {
           combinedData.sort((a, b) => {
             const dateA = parseSafeDate(a.deadline);
@@ -511,6 +544,27 @@ const DashboardScreen = ({ onLogout }) => {
       await AsyncStorage.setItem(STORAGE_CUSTOM_DEADLINES, JSON.stringify(updatedList));
     } catch (error) {
       console.error('Error removing custom deadline', error);
+    }
+  };
+
+  // ✨ NEW: The Blacklist Function ✨
+  const addToBlacklist = async (item) => {
+    // We only need to blacklist tasks that originally came from the FEeLS scraper
+    if (item?.source === 'feels') {
+      try {
+        const savedStr = await AsyncStorage.getItem('@hidden_feels_tasks');
+        const hiddenList = savedStr ? JSON.parse(savedStr) : [];
+        
+        // Create a unique fingerprint based on the original subject and description
+        const taskSignature = `${item.subject}-${item.description}`; 
+
+        if (!hiddenList.includes(taskSignature)) {
+          hiddenList.push(taskSignature);
+          await AsyncStorage.setItem('@hidden_feels_tasks', JSON.stringify(hiddenList));
+        }
+      } catch (error) { 
+        console.error('Error blacklisting task', error); 
+      }
     }
   };
 
