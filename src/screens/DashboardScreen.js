@@ -51,11 +51,31 @@ const parseSafeDate = (dateString) => {
 
 const normalizeCustomDeadlines = (items) => {
   if (!Array.isArray(items)) return [];
-  return items.map((item) => ({
-    ...item,
-    id: item.id || `${item.subject || ''}-${item.deadline || ''}`,
-    source: 'custom',
-  }));
+  return items.map((item) => {
+    
+    // 1. Calculate fresh remaining time
+    let updatedRemaining = item.remaining;
+    const targetDate = parseSafeDate(item.deadline);
+    
+    if (!isNaN(targetDate)) {
+      const diffMs = targetDate.getTime() - Date.now();
+      if (diffMs < 0) {
+        updatedRemaining = "Overdue 🚨";
+      } else {
+        const daysLeft = Math.floor(diffMs / (1000 * 60 * 60 * 24));
+        const hoursLeft = Math.floor((diffMs % (1000 * 60 * 60 * 24)) / (1000 * 60 * 60));
+        updatedRemaining = `${daysLeft} days ${hoursLeft} hours`;
+      }
+    }
+
+    // 2. Return item with the injected fresh time
+    return {
+      ...item,
+      remaining: updatedRemaining, 
+      id: item.id || `${item.subject || ''}-${item.deadline || ''}`,
+      source: 'custom',
+    };
+  });
 };
 
 const normalizeFeelsDeadlines = (items) => {
@@ -895,18 +915,22 @@ const DashboardScreen = ({ onLogout }) => {
                 setStatus('Logging in...'); 
                 webviewRef.current.injectJavaScript(`
                   setTimeout(function() {
-                    // ✨ 1. Check if Moodle generated a red error alert
                     var errorAlert = document.querySelector('.alert-danger, .error, #loginerrormessage');
+                    
                     if (errorAlert && errorAlert.innerText.trim().length > 0) {
-                      // Tell React Native to stop and show the error!
-                      window.ReactNativeWebView.postMessage(JSON.stringify({
-                        type: 'LOGIN_FAILED', 
-                        message: errorAlert.innerText.trim()
-                      }));
-                      return; // Stop the script from trying to log in again
+                      var errorText = errorAlert.innerText.toLowerCase();
+                      
+                      // ✨ THE FIX: Check if it's just a timeout warning. If it is NOT a timeout, throw the error.
+                      if (!errorText.includes('session') && !errorText.includes('time out') && !errorText.includes('timed out')) {
+                        window.ReactNativeWebView.postMessage(JSON.stringify({
+                          type: 'LOGIN_FAILED', 
+                          message: errorAlert.innerText.trim()
+                        }));
+                        return; // Stop the script
+                      }
                     }
 
-                    // ✨ 2. If no error, proceed with normal login
+                    // If there is no error (or if it was just a timeout warning), proceed with login!
                     var u = document.getElementById('username') || document.querySelector('input[name="username"]');
                     var p = document.getElementById('password') || document.querySelector('input[name="password"]');
                     var b = document.getElementById('loginbtn') || document.querySelector('button[type="submit"]') || document.querySelector('[type="submit"]');

@@ -1,0 +1,16 @@
+#To clean the android Build folder
+cd android
+./gradlew clean
+cd ..
+
+#Clear Watchman and Metro Bundler Cache
+watchman watch-del-all
+npm start -- --reset-cache
+
+#Rebuild the App
+npx react-native run-android
+
+#To check the connection
+adb devices
+
+
