@@ -7,7 +7,7 @@ import CookieManager from '@react-native-cookies/cookies';
 import DateTimePicker from '@react-native-community/datetimepicker';
 import notifee, { AuthorizationStatus, TimestampTrigger, TriggerType } from '@notifee/react-native';
 import { parseDeadlineString } from '../utils/parser';
-import { GestureHandlerRootView, Swipeable } from 'react-native-gesture-handler';
+import { Swipeable } from 'react-native-gesture-handler';
 import Reanimated, { FadeInDown, FadeOut, LinearTransition, ZoomIn } from 'react-native-reanimated';
 import BootSplash from "react-native-bootsplash";
 import Clipboard from '@react-native-clipboard/clipboard';
@@ -104,7 +104,7 @@ const getDeadlineCategory = (item) => {
   return 'Other';
 };
 
-const DashboardScreen = ({ onLogout }) => {
+const DashboardScreen = ({ onLogout, navigation }) => {
   const webviewRef = useRef(null);
   const [credentials, setCredentials] = useState(null);
   const [status, setStatus] = useState('Unlocking vault...');
@@ -593,13 +593,14 @@ const DashboardScreen = ({ onLogout }) => {
   return (
     <SafeAreaView style={styles.safeArea}>
       <StatusBar barStyle="dark-content" backgroundColor="#f8f9fa" />
-      <GestureHandlerRootView style={styles.container}>
+      <View style={styles.container}>
         
         {/* HEADER */}
         <View style={styles.headerRow}>
           <Text style={styles.title}>FEeLs</Text>
           <View style={styles.headerButtons}>
             <TouchableOpacity onPress={handleShare} style={styles.iconBtn}><ShareIcon size={28} color="#111827" /></TouchableOpacity>
+            <TouchableOpacity onPress={() => navigation.navigate('ToDo')} style={styles.iconBtn}><CheckCircleIcon size={28} color="#111827" /></TouchableOpacity>
             <TouchableOpacity onPress={() => setShowSettings(true)} style={styles.iconBtn}><Cog6ToothIcon size={30} color="#111827" /></TouchableOpacity>
           </View>
         </View>
@@ -959,7 +960,7 @@ const DashboardScreen = ({ onLogout }) => {
             domStorageEnabled={true}
           />
         </View>
-      </GestureHandlerRootView>
+      </View>
     </SafeAreaView>
   );
 };

@@ -13,4 +13,7 @@ npx react-native run-android
 #To check the connection
 adb devices
 
-
+#To create a APK file
+cd android
+./gradlew clean
+./gradlew assembleRelease

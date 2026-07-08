@@ -1,9 +1,16 @@
 import React, { useCallback, useEffect, useState } from 'react';
-import { SafeAreaView, StyleSheet } from 'react-native';
+import { StyleSheet } from 'react-native';
 import * as Keychain from 'react-native-keychain';
 import BootSplash from 'react-native-bootsplash';
+import { NavigationContainer } from '@react-navigation/native';
+import { createNativeStackNavigator } from '@react-navigation/native-stack';
+import { GestureHandlerRootView } from 'react-native-gesture-handler';
+import { SafeAreaProvider } from 'react-native-safe-area-context';
 import LoginScreen from './src/screens/LoginScreen';
 import DashboardScreen from './src/screens/DashboardScreen';
+import ToDoScreen from './src/screens/ToDoScreen';
+
+const Stack = createNativeStackNavigator();
 
 const App = () => {
   const [hasCredentials, setHasCredentials] = useState(false);
@@ -49,14 +56,36 @@ const App = () => {
     return null;
   }
 
+  if (!hasCredentials) {
+    return (
+      <SafeAreaProvider>
+        <GestureHandlerRootView style={styles.root} onLayout={onRootLayout}>
+          <LoginScreen onLoginSuccess={() => setHasCredentials(true)} />
+        </GestureHandlerRootView>
+      </SafeAreaProvider>
+    );
+  }
+
   return (
-    <SafeAreaView style={styles.root} onLayout={onRootLayout}>
-      {!hasCredentials ? (
-        <LoginScreen onLoginSuccess={() => setHasCredentials(true)} />
-      ) : (
-        <DashboardScreen onLogout={clearVault} />
-      )}
-    </SafeAreaView>
+    <SafeAreaProvider>
+      <GestureHandlerRootView style={styles.root} onLayout={onRootLayout}>
+        <NavigationContainer>
+          <Stack.Navigator
+            screenOptions={{
+              headerShown: false,
+              animation: 'slide_from_right',
+            }}
+          >
+            <Stack.Screen name="Dashboard">
+              {(props) => (
+                <DashboardScreen {...props} onLogout={clearVault} />
+              )}
+            </Stack.Screen>
+            <Stack.Screen name="ToDo" component={ToDoScreen} />
+          </Stack.Navigator>
+        </NavigationContainer>
+      </GestureHandlerRootView>
+    </SafeAreaProvider>
   );
 };
 
