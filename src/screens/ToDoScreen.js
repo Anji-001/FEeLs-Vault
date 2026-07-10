@@ -243,7 +243,7 @@ const ToDoScreen = ({ navigation }) => {
 
   // ── Delete a category – open custom modal (long-press) ──────────────────────
   const handleDeleteCategory = (cat) => {
-    if (cat === 'All') return; // 'All' is protected — never deletable
+    if (cat === 'All' || cat === 'Personal') return; // 'All' and 'Personal' are protected — never deletable
     setCategoryToDelete(cat);
     setShowDeleteModal(true);
   };

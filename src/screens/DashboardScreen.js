@@ -37,14 +37,27 @@ const parseSafeDate = (dateString) => {
   if (isNaN(targetDate)) {
     const parts = dateString.match(/(\d+)\/(\d+)\/(\d+)\s+(\d+):(\d+)\s+(AM|PM)/i);
     if (parts) {
-      const month = parseInt(parts[1], 10) - 1; 
-      const day = parseInt(parts[2], 10);
+      let part1 = parseInt(parts[1], 10);
+      let part2 = parseInt(parts[2], 10);
+
+      // Auto-detect DD/MM vs MM/DD
+      let month, day;
+      if (part1 > 12) {
+        day = part1;
+        month = part2 - 1; // 0-indexed month
+      } else {
+        month = part1 - 1;
+        day = part2;
+      }
+
       const year = parseInt(parts[3], 10);
       let hours = parseInt(parts[4], 10);
       const minutes = parseInt(parts[5], 10);
       const ampm = parts[6].toUpperCase();
+
       if (ampm === 'PM' && hours < 12) hours += 12;
       if (ampm === 'AM' && hours === 12) hours = 0;
+
       targetDate = new Date(year, month, day, hours, minutes);
     }
   }
@@ -54,11 +67,11 @@ const parseSafeDate = (dateString) => {
 const normalizeCustomDeadlines = (items) => {
   if (!Array.isArray(items)) return [];
   return items.map((item) => {
-    
+
     // 1. Calculate fresh remaining time
     let updatedRemaining = item.remaining;
     const targetDate = parseSafeDate(item.deadline);
-    
+
     if (!isNaN(targetDate)) {
       const diffMs = targetDate.getTime() - Date.now();
       if (diffMs < 0) {
@@ -73,7 +86,7 @@ const normalizeCustomDeadlines = (items) => {
     // 2. Return item with the injected fresh time
     return {
       ...item,
-      remaining: updatedRemaining, 
+      remaining: updatedRemaining,
       id: item.id || `${item.subject || ''}-${item.deadline || ''}`,
       source: 'custom',
     };
@@ -90,12 +103,12 @@ const normalizeFeelsDeadlines = (items) => {
 
 const getUrgencyStyle = (deadlineStr) => {
   const targetDate = parseSafeDate(deadlineStr);
-  if (isNaN(targetDate)) return styles.cardSafe; 
+  if (isNaN(targetDate)) return styles.cardSafe;
   const diffMs = targetDate.getTime() - Date.now();
-  if (diffMs < 0) return styles.cardOverdue; 
-  if (diffMs < 24 * 60 * 60 * 1000) return styles.cardUrgent; 
-  if (diffMs < 3 * 24 * 60 * 60 * 1000) return styles.cardWarning; 
-  return styles.cardSafe; 
+  if (diffMs < 0) return styles.cardOverdue;
+  if (diffMs < 24 * 60 * 60 * 1000) return styles.cardUrgent;
+  if (diffMs < 3 * 24 * 60 * 60 * 1000) return styles.cardWarning;
+  return styles.cardSafe;
 };
 
 const getDeadlineCategory = (item) => {
@@ -110,13 +123,13 @@ const DashboardScreen = ({ onLogout, navigation }) => {
   const webviewRef = useRef(null);
   const [credentials, setCredentials] = useState(null);
   const [status, setStatus] = useState('Unlocking vault...');
-  
+
   // States
   const [deadlines, setDeadlines] = useState([]);
   const [notes, setNotes] = useState([]); // ✨ NEW: Notes Array
   const [loginError, setLoginError] = useState(null);
   const [successMessage, setSuccessMessage] = useState(null);
-  
+
   const [refreshing, setRefreshing] = useState(false);
   const [reminderOffset, setReminderOffset] = useState('24');
   const [showSettings, setShowSettings] = useState(false);
@@ -131,7 +144,7 @@ const DashboardScreen = ({ onLogout, navigation }) => {
   const [showAddModal, setShowAddModal] = useState(false);
   const [newSubject, setNewSubject] = useState('');
   const [newDesc, setNewDesc] = useState('');
-  const [customDate, setCustomDate] = useState(new Date()); 
+  const [customDate, setCustomDate] = useState(new Date());
   const [showPicker, setShowPicker] = useState(false);
   const [pickerMode, setPickerMode] = useState('date');
   const [editingIndex, setEditingIndex] = useState(null);
@@ -151,7 +164,7 @@ const DashboardScreen = ({ onLogout, navigation }) => {
       await notifee.requestPermission();
       const creds = await Keychain.getGenericPassword();
       if (creds) { setCredentials(creds); setStatus('Connecting to FEeLS...'); } else { onLogout(); }
-      
+
       // Load saved templates and notes
       try {
         const [savedHeader, savedItem, savedOffset, savedDivider, savedNotes] = await Promise.all([
@@ -192,7 +205,7 @@ const DashboardScreen = ({ onLogout, navigation }) => {
       } catch (e) {
         console.error("Failed to load cached deadlines on boot", e);
       }
-      
+
     };
     loadData();
   }, []);
@@ -202,7 +215,7 @@ const DashboardScreen = ({ onLogout, navigation }) => {
     await AsyncStorage.setItem('@item_template', itemTemplate);
     await AsyncStorage.setItem('@reminder_offset', reminderOffset);
     await AsyncStorage.setItem('@divider_template', dividerTemplate);
-    
+
     setShowSettings(false); // Close the settings menu
     setSuccessMessage("Your settings have been saved successfully!"); // ✨ Trigger custom modal
   };
@@ -221,7 +234,7 @@ const DashboardScreen = ({ onLogout, navigation }) => {
       // 3. ✨ NEW: Shred the cached deadlines from the phone's hard drive ✨
       await AsyncStorage.removeItem(STORAGE_CUSTOM_DEADLINES);
       await AsyncStorage.removeItem(STORAGE_CACHED_FEELS);
-      
+
       // Note: We are deliberately leaving settings (like header formats) and Quick Notes intact, 
       // but if you want to wipe notes too, just uncomment the line below:
       // await AsyncStorage.removeItem('@saved_notes');
@@ -253,7 +266,7 @@ const DashboardScreen = ({ onLogout, navigation }) => {
 
   const handleSaveNote = async () => {
     if (!noteTopic.trim()) return Alert.alert("Missing Topic", "Give your note a title!");
-    
+
     let updatedNotes;
     if (editingNoteId) {
       updatedNotes = notes.map(n => n.id === editingNoteId ? { ...n, topic: noteTopic, content: noteContent } : n);
@@ -261,7 +274,7 @@ const DashboardScreen = ({ onLogout, navigation }) => {
       const newNote = { id: Date.now().toString(), topic: noteTopic, content: noteContent };
       updatedNotes = [newNote, ...notes]; // Put new notes at the front
     }
-    
+
     setNotes(updatedNotes);
     await AsyncStorage.setItem('@saved_notes', JSON.stringify(updatedNotes));
     setShowNoteModal(false);
@@ -279,17 +292,17 @@ const DashboardScreen = ({ onLogout, navigation }) => {
     // Combines the topic and content with a line break
     const textToCopy = `*${noteTopic}*\n\n${noteContent}`;
     Clipboard.setString(textToCopy);
-    
+
     // Uses the custom green modal we just built!
-    setShowNoteModal(false); 
-    setSuccessMessage("Note copied to clipboard!"); 
+    setShowNoteModal(false);
+    setSuccessMessage("Note copied to clipboard!");
   };
 
   // --- Task Logic (Unchanged) ---
   const scheduleDeadlineReminder = async (subject, description, deadlineDateString) => {
     const targetDate = parseSafeDate(deadlineDateString);
     if (isNaN(targetDate)) return;
-    const offsetHours = parseInt(reminderOffset, 10) || 24; 
+    const offsetHours = parseInt(reminderOffset, 10) || 24;
     const triggerTime = new Date(targetDate.getTime());
     triggerTime.setHours(triggerTime.getHours() - offsetHours);
     if (triggerTime.getTime() < Date.now()) return;
@@ -305,24 +318,24 @@ const DashboardScreen = ({ onLogout, navigation }) => {
   };
 
   const cancelAlarm = async (subject, deadlineDateString) => {
-      const targetDate = parseSafeDate(deadlineDateString);
-      if(isNaN(targetDate)) return;
-      const notificationId = `${subject.replace(/\s+/g, '')}-${targetDate.getTime()}`;
-      try { await notifee.cancelNotification(notificationId); } catch (error) {}
+    const targetDate = parseSafeDate(deadlineDateString);
+    if (isNaN(targetDate)) return;
+    const notificationId = `${subject.replace(/\s+/g, '')}-${targetDate.getTime()}`;
+    try { await notifee.cancelNotification(notificationId); } catch (error) { }
   };
 
   const handleRemoveDeadline = (indexToRemove) => {
     if (rowRefs.get(indexToRemove)) rowRefs.get(indexToRemove).close();
     const itemToDelete = deadlines[indexToRemove];
-    cancelAlarm(itemToDelete.subject, itemToDelete.deadline).catch(e => {});
+    cancelAlarm(itemToDelete.subject, itemToDelete.deadline).catch(e => { });
     setLastDeleted({ item: itemToDelete, index: indexToRemove });
     setDeadlines(prev => prev.filter((_, index) => index !== indexToRemove));
-    
+
     if (itemToDelete?.source === 'custom') {
       removeCustomDeadline(itemToDelete.id);
     } else {
       // If it's a FEeLS task, blacklist it so it doesn't reappear on next sync
-      addToBlacklist(itemToDelete); 
+      addToBlacklist(itemToDelete);
     }
   };
 
@@ -364,7 +377,7 @@ const DashboardScreen = ({ onLogout, navigation }) => {
     if (filteredDeadlines.length === 0) return;
     const formattedItems = filteredDeadlines.map(d => itemTemplate.replace(/{subject}/g, d.subject).replace(/{desc}/g, d.description).replace(/{date}/g, d.deadline).replace(/{left}/g, d.remaining));
     const shareText = `${headerTemplate}\n\n${formattedItems.join(dividerTemplate)}`;
-    try { await Share.share({ message: shareText }); } catch (error) {}
+    try { await Share.share({ message: shareText }); } catch (error) { }
   };
 
   const getFormattedDateString = (dateObj) => `${dateObj.getMonth() + 1}/${dateObj.getDate()}/${dateObj.getFullYear()}`;
@@ -373,7 +386,7 @@ const DashboardScreen = ({ onLogout, navigation }) => {
     let minutes = dateObj.getMinutes();
     const ampm = hours >= 12 ? 'PM' : 'AM';
     hours = hours % 12;
-    hours = hours ? hours : 12; 
+    hours = hours ? hours : 12;
     minutes = minutes < 10 ? '0' + minutes : minutes;
     return `${hours}:${minutes} ${ampm}`;
   };
@@ -382,14 +395,14 @@ const DashboardScreen = ({ onLogout, navigation }) => {
   const onChangePicker = (event, selectedDate) => { setShowPicker(false); if (selectedDate) setCustomDate(selectedDate); };
 
   const handleEditClick = (index) => {
-      if (rowRefs.get(index)) rowRefs.get(index).close();
-      const itemToEdit = deadlines[index];
-      setEditingIndex(index);
-      setNewSubject(itemToEdit.subject);
-      setNewDesc(itemToEdit.description);
-      const parsedDate = parseSafeDate(itemToEdit.deadline);
-      setCustomDate(!isNaN(parsedDate) ? parsedDate : new Date());
-      setTimeout(() => setShowAddModal(true), 150);
+    if (rowRefs.get(index)) rowRefs.get(index).close();
+    const itemToEdit = deadlines[index];
+    setEditingIndex(index);
+    setNewSubject(itemToEdit.subject);
+    setNewDesc(itemToEdit.description);
+    const parsedDate = parseSafeDate(itemToEdit.deadline);
+    setCustomDate(!isNaN(parsedDate) ? parsedDate : new Date());
+    setTimeout(() => setShowAddModal(true), 150);
   };
 
   const handleSaveTask = async () => {
@@ -397,9 +410,9 @@ const DashboardScreen = ({ onLogout, navigation }) => {
     const diffMs = customDate - new Date();
     let remaining = diffMs < 0 ? "Overdue" : `${Math.floor(diffMs / (1000 * 60 * 60 * 24))} days ${Math.floor((diffMs % (1000 * 60 * 60 * 24)) / (1000 * 60 * 60))} hours`;
     const deadlineStr = `${getFormattedDateString(customDate)} ${getFormattedTimeString(customDate)}`;
-    
+
     const existingItem = editingIndex !== null ? deadlines[editingIndex] : null;
-    
+
     // We force the source to 'custom' so it ALWAYS saves permanently
     const updatedItem = {
       subject: newSubject.toUpperCase(),
@@ -407,44 +420,44 @@ const DashboardScreen = ({ onLogout, navigation }) => {
       deadline: deadlineStr,
       remaining: remaining,
       id: existingItem?.id || `${newSubject.toUpperCase()}-${deadlineStr}`,
-      source: 'custom', 
+      source: 'custom',
     };
 
     if (editingIndex !== null) {
-        const oldItem = deadlines[editingIndex];
-        await cancelAlarm(oldItem.subject, oldItem.deadline);
-        
-        // ✨ NEW: Blacklist the old FEeLS version so it doesn't duplicate
-        if (oldItem?.source === 'feels') {
-           await addToBlacklist(oldItem);
-        }
-        
-        setDeadlines(prev => { 
-          const newList = [...prev]; 
-          newList[editingIndex] = updatedItem; 
-          return newList; 
-        });
-        
-        scheduleDeadlineReminder(updatedItem.subject, updatedItem.description, updatedItem.deadline);
-        
-        // ✨ Unconditionally save edits to the hard drive!
-        await upsertCustomDeadline(updatedItem);
-        
+      const oldItem = deadlines[editingIndex];
+      await cancelAlarm(oldItem.subject, oldItem.deadline);
+
+      // ✨ NEW: Blacklist the old FEeLS version so it doesn't duplicate
+      if (oldItem?.source === 'feels') {
+        await addToBlacklist(oldItem);
+      }
+
+      setDeadlines(prev => {
+        const newList = [...prev];
+        newList[editingIndex] = updatedItem;
+        return newList;
+      });
+
+      scheduleDeadlineReminder(updatedItem.subject, updatedItem.description, updatedItem.deadline);
+
+      // ✨ Unconditionally save edits to the hard drive!
+      await upsertCustomDeadline(updatedItem);
+
     } else {
-        setDeadlines(prev => {
-          const newList = [...prev, updatedItem];
-          newList.sort((a, b) => parseSafeDate(a.deadline) - parseSafeDate(b.deadline));
-          return newList;
-        });
-        scheduleDeadlineReminder(updatedItem.subject, updatedItem.description, updatedItem.deadline);
-        await upsertCustomDeadline(updatedItem);
+      setDeadlines(prev => {
+        const newList = [...prev, updatedItem];
+        newList.sort((a, b) => parseSafeDate(a.deadline) - parseSafeDate(b.deadline));
+        return newList;
+      });
+      scheduleDeadlineReminder(updatedItem.subject, updatedItem.description, updatedItem.deadline);
+      await upsertCustomDeadline(updatedItem);
     }
-    
-    setShowAddModal(false); 
-    setNewSubject(''); 
-    setNewDesc(''); 
-    setCustomDate(new Date()); 
-    setEditingIndex(null); 
+
+    setShowAddModal(false);
+    setNewSubject('');
+    setNewDesc('');
+    setCustomDate(new Date());
+    setEditingIndex(null);
   };
 
   const handleOpenAdd = () => { setEditingIndex(null); setNewSubject(''); setNewDesc(''); setCustomDate(new Date()); setShowAddModal(true); };
@@ -465,24 +478,24 @@ const DashboardScreen = ({ onLogout, navigation }) => {
   const handleMessage = async (event) => {
     try {
       const parsed = JSON.parse(event.nativeEvent.data);
-      
+
       if (parsed.type === 'LOGIN_FAILED') {
         setStatus('Login Failed 🚨');
-        setLoginError(parsed.message); 
-        return; 
+        setLoginError(parsed.message);
+        return;
       }
 
       if (parsed.type === 'SCRAPED_DATA') {
-        
+
         // 1. FETCH CUSTOM DEADLINES AND THE BLACKLIST
         const [savedCustomStr, savedHiddenStr] = await Promise.all([
           AsyncStorage.getItem(STORAGE_CUSTOM_DEADLINES),
           AsyncStorage.getItem('@hidden_feels_tasks')
         ]);
-        
+
         const customDeadlines = normalizeCustomDeadlines(savedCustomStr ? JSON.parse(savedCustomStr) : []);
         const hiddenList = savedHiddenStr ? JSON.parse(savedHiddenStr) : [];
-        
+
         const rawArray = parsed.data || [];
         let structuredData = [];
 
@@ -492,7 +505,7 @@ const DashboardScreen = ({ onLogout, navigation }) => {
             .map(item => parseDeadlineString(item))
             .filter(item => {
               const targetDate = parseSafeDate(item.deadline);
-              if (isNaN(targetDate)) return true; 
+              if (isNaN(targetDate)) return true;
               const msPastDeadline = Date.now() - targetDate.getTime();
               const oneDayMs = 24 * 60 * 60 * 1000;
               return msPastDeadline < oneDayMs;
@@ -501,8 +514,8 @@ const DashboardScreen = ({ onLogout, navigation }) => {
 
         // 3. ✨ FILTER OUT BLACKLISTED TASKS ✨
         const feelsDeadlines = normalizeFeelsDeadlines(structuredData).filter(item => {
-           const signature = `${item.subject}-${item.description}`;
-           return !hiddenList.includes(signature); // Toss it out if you already edited it!
+          const signature = `${item.subject}-${item.description}`;
+          return !hiddenList.includes(signature); // Toss it out if you already edited it!
         });
 
         await AsyncStorage.setItem(STORAGE_CACHED_FEELS, JSON.stringify(feelsDeadlines));
@@ -519,19 +532,19 @@ const DashboardScreen = ({ onLogout, navigation }) => {
             const timeB = isNaN(dateB) ? 0 : dateB.getTime();
             return timeA - timeB;
           });
-          
+
           setDeadlines(combinedData);
-          setStatus('Deadlines Synced'); 
+          setStatus('Deadlines Synced');
           combinedData.forEach(item => scheduleDeadlineReminder(item.subject, item.description, item.deadline));
-        } else { 
-          setDeadlines([]); 
-          setStatus('No actionable deadlines.'); 
+        } else {
+          setDeadlines([]);
+          setStatus('No actionable deadlines.');
         }
       }
-    } catch (e) { 
-      setStatus('Error loading data.'); 
-    } finally { 
-      setRefreshing(false); 
+    } catch (e) {
+      setStatus('Error loading data.');
+    } finally {
+      setRefreshing(false);
     }
   };
 
@@ -597,16 +610,16 @@ const DashboardScreen = ({ onLogout, navigation }) => {
       try {
         const savedStr = await AsyncStorage.getItem('@hidden_feels_tasks');
         const hiddenList = savedStr ? JSON.parse(savedStr) : [];
-        
+
         // Create a unique fingerprint based on the original subject and description
-        const taskSignature = `${item.subject}-${item.description}`; 
+        const taskSignature = `${item.subject}-${item.description}`;
 
         if (!hiddenList.includes(taskSignature)) {
           hiddenList.push(taskSignature);
           await AsyncStorage.setItem('@hidden_feels_tasks', JSON.stringify(hiddenList));
         }
-      } catch (error) { 
-        console.error('Error blacklisting task', error); 
+      } catch (error) {
+        console.error('Error blacklisting task', error);
       }
     }
   };
@@ -617,7 +630,7 @@ const DashboardScreen = ({ onLogout, navigation }) => {
     <SafeAreaView style={styles.safeArea}>
       <StatusBar barStyle="dark-content" backgroundColor="#f8f9fa" />
       <View style={styles.container}>
-        
+
         {/* HEADER */}
         <View style={styles.headerRow}>
           <Text style={styles.title}>FEeLs</Text>
@@ -627,17 +640,17 @@ const DashboardScreen = ({ onLogout, navigation }) => {
             <TouchableOpacity onPress={() => setShowSettings(true)} style={styles.iconBtn}><Cog6ToothIcon size={30} color="#111827" /></TouchableOpacity>
           </View>
         </View>
-        
+
         {/* STATUS */}
         <View style={styles.statusBox}>
-          {status === 'Deadlines Synced' || status.includes('No actionable') || status.includes('No upcoming') 
-            ? <CheckCircleIcon size={16} color="#16a34a" style={styles.statusIcon} /> : <ActivityIndicator size="small" color="#0066cc" style={{marginRight: 8}} />
+          {status === 'Deadlines Synced' || status.includes('No actionable') || status.includes('No upcoming')
+            ? <CheckCircleIcon size={16} color="#16a34a" style={styles.statusIcon} /> : <ActivityIndicator size="small" color="#0066cc" style={{ marginRight: 8 }} />
           }
           <Text style={styles.statusText}>{status}</Text>
         </View>
 
-        <ScrollView 
-          contentContainerStyle={styles.scrollPadding} 
+        <ScrollView
+          contentContainerStyle={styles.scrollPadding}
           showsVerticalScrollIndicator={false}
           refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} colors={['#0066cc']} />}
         >
@@ -645,7 +658,7 @@ const DashboardScreen = ({ onLogout, navigation }) => {
           <View style={styles.notesSection}>
             <Text style={styles.sectionTitle}>Quick Notes</Text>
             <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.notesScrollContainer}>
-              
+
               {/* Add Note Button */}
               <TouchableOpacity style={styles.addNoteTile} onPress={() => handleOpenNote()}>
                 <PlusIcon size={28} color="#9ca3af" style={styles.addNoteIcon} />
@@ -663,7 +676,7 @@ const DashboardScreen = ({ onLogout, navigation }) => {
             </ScrollView>
           </View>
 
-          <Text style={[styles.sectionTitle, {marginTop: 15, paddingHorizontal: 20}]}>Upcoming Deadlines</Text>
+          <Text style={[styles.sectionTitle, { marginTop: 15, paddingHorizontal: 20 }]}>Upcoming Deadlines</Text>
           <ScrollView
             horizontal
             showsHorizontalScrollIndicator={false}
@@ -705,31 +718,31 @@ const DashboardScreen = ({ onLogout, navigation }) => {
           {deadlines.length > 0 ? (
             deadlines.map((item, index) => (
               (deadlineFilters.length === 0 || deadlineFilters.includes(getDeadlineCategory(item))) ?
-              <Reanimated.View key={item.subject + item.deadline} style={styles.cardWrapper} entering={FadeInDown.duration(200)} exiting={FadeOut.duration(150)} layout={LinearTransition.duration(200)}>
-                <Swipeable
-                  ref={ref => { if (ref && !rowRefs.get(index)) { rowRefs.set(index, ref); } }}
-                  renderLeftActions={(progress, dragX) => renderLeftActions(progress, dragX, index)}
-                  renderRightActions={(progress, dragX) => renderRightActions(progress, dragX, index)}
-                  overshootLeft={false}
-                  overshootRight={false}
-                  containerStyle={styles.swipeContainer}
-                >
-                  <View style={[styles.card, getUrgencyStyle(item.deadline)]}>
-                    <View style={styles.cardHeader}>
-                      <View style={styles.moduleBadge}><Text style={styles.moduleBadgeText}>{item.subject}</Text></View>
-                    </View>
-                    <Text style={styles.cardTask}>{item.description}</Text>
-                    <View style={styles.cardFooter}>
-                      <View style={styles.footerItem}><CalendarDaysIcon size={14} color="#6b7280" style={styles.footerIcon} /><Text style={styles.cardTime}>{item.deadline.split(' ')[0]}</Text></View>
-                      <View style={styles.footerItem}>
-                        <ClockIcon size={14} color="#6b7280" style={styles.footerIcon} />
-                        <Text style={[styles.cardLeft, getUrgencyStyle(item.deadline) === styles.cardOverdue && {color: '#888'}]}>{item.remaining}</Text>
+                <Reanimated.View key={item.id} style={styles.cardWrapper} entering={FadeInDown.duration(200)} exiting={FadeOut.duration(150)} layout={LinearTransition.duration(200)}>
+                  <Swipeable
+                    ref={ref => { if (ref && !rowRefs.get(index)) { rowRefs.set(index, ref); } }}
+                    renderLeftActions={(progress, dragX) => renderLeftActions(progress, dragX, index)}
+                    renderRightActions={(progress, dragX) => renderRightActions(progress, dragX, index)}
+                    overshootLeft={false}
+                    overshootRight={false}
+                    containerStyle={styles.swipeContainer}
+                  >
+                    <View style={[styles.card, getUrgencyStyle(item.deadline)]}>
+                      <View style={styles.cardHeader}>
+                        <View style={styles.moduleBadge}><Text style={styles.moduleBadgeText}>{item.subject}</Text></View>
+                      </View>
+                      <Text style={styles.cardTask}>{item.description}</Text>
+                      <View style={styles.cardFooter}>
+                        <View style={styles.footerItem}><CalendarDaysIcon size={14} color="#6b7280" style={styles.footerIcon} /><Text style={styles.cardTime}>{item.deadline.split(' ')[0]}</Text></View>
+                        <View style={styles.footerItem}>
+                          <ClockIcon size={14} color="#6b7280" style={styles.footerIcon} />
+                          <Text style={[styles.cardLeft, getUrgencyStyle(item.deadline) === styles.cardOverdue && { color: '#888' }]}>{item.remaining}</Text>
+                        </View>
                       </View>
                     </View>
-                  </View>
-                </Swipeable>
-              </Reanimated.View>
-              : null
+                  </Swipeable>
+                </Reanimated.View>
+                : null
             ))
           ) : (
             <View style={styles.emptyState}>
@@ -753,10 +766,10 @@ const DashboardScreen = ({ onLogout, navigation }) => {
         {/* --- ✨ NEW: NOTES MODAL ✨ --- */}
         <Modal visible={showNoteModal} animationType="slide" transparent={true}>
           <View style={styles.modalOverlay}>
-            <View style={[styles.modalContent, { height: '80%' }]}> 
+            <View style={[styles.modalContent, { height: '80%' }]}>
               <View style={styles.noteModalHeader}>
                 <Text style={styles.modalTitle}>{editingNoteId ? 'Edit Note' : 'New Note'}</Text>
-                
+
                 {/* ✨ NEW: Grouping the buttons together */}
                 <View style={{ flexDirection: 'row', alignItems: 'center' }}>
                   {editingNoteId && (
@@ -772,24 +785,24 @@ const DashboardScreen = ({ onLogout, navigation }) => {
                 </View>
               </View>
 
-              <TextInput 
-                style={styles.noteTopicInput} 
-                value={noteTopic} 
-                onChangeText={setNoteTopic} 
-                placeholder="Topic (e.g. CO322 Passwords)" 
+              <TextInput
+                style={styles.noteTopicInput}
+                value={noteTopic}
+                onChangeText={setNoteTopic}
+                placeholder="Topic (e.g. CO322 Passwords)"
                 placeholderTextColor="#9ca3af"
               />
-              
-              <TextInput 
-                style={styles.noteContentInput} 
-                value={noteContent} 
-                onChangeText={setNoteContent} 
-                placeholder="Start typing..." 
+
+              <TextInput
+                style={styles.noteContentInput}
+                value={noteContent}
+                onChangeText={setNoteContent}
+                placeholder="Start typing..."
                 placeholderTextColor="#9ca3af"
                 multiline={true}
                 textAlignVertical="top"
               />
-              
+
               <View style={styles.modalButtons}>
                 <TouchableOpacity style={styles.cancelModalBtn} onPress={() => setShowNoteModal(false)}>
                   <Text style={styles.cancelModalBtnText}>Close</Text>
@@ -817,7 +830,7 @@ const DashboardScreen = ({ onLogout, navigation }) => {
               </View>
               {showPicker && <DateTimePicker value={customDate} mode={pickerMode} is24Hour={false} display="default" onChange={onChangePicker} />}
               <View style={styles.modalButtons}>
-                <TouchableOpacity style={styles.cancelModalBtn} onPress={() => {setShowAddModal(false); setEditingIndex(null);}}><Text style={styles.cancelModalBtnText}>Cancel</Text></TouchableOpacity>
+                <TouchableOpacity style={styles.cancelModalBtn} onPress={() => { setShowAddModal(false); setEditingIndex(null); }}><Text style={styles.cancelModalBtnText}>Cancel</Text></TouchableOpacity>
                 <TouchableOpacity style={styles.saveModalBtn} onPress={handleSaveTask}><Text style={styles.saveModalBtnText}>{editingIndex !== null ? 'Save Changes' : 'Add Task'}</Text></TouchableOpacity>
               </View>
             </View>
@@ -830,17 +843,17 @@ const DashboardScreen = ({ onLogout, navigation }) => {
             <View style={styles.modalContent}>
               <Text style={styles.modalTitle}>Settings</Text>
               <Text style={styles.inputLabel}>Remind me X hours before:</Text>
-              <TextInput style={styles.input} value={reminderOffset} onChangeText={setReminderOffset} keyboardType="number-pad"/>
+              <TextInput style={styles.input} value={reminderOffset} onChangeText={setReminderOffset} keyboardType="number-pad" />
               <Text style={styles.inputLabel}>Header Text (Share):</Text>
               <TextInput style={styles.input} value={headerTemplate} onChangeText={setHeaderTemplate} />
               <Text style={styles.inputLabel}>Item Format (Share):</Text>
               <TextInput style={[styles.input, { height: 80, textAlignVertical: 'top' }]} multiline={true} value={itemTemplate} onChangeText={setItemTemplate} />
               <Text style={styles.inputLabel}>Divider (Share):</Text>
-              <TextInput 
-                style={[styles.input, { height: 60, textAlignVertical: 'top' }]} 
-                multiline={true} 
-                value={dividerTemplate} 
-                onChangeText={setDividerTemplate} 
+              <TextInput
+                style={[styles.input, { height: 60, textAlignVertical: 'top' }]}
+                multiline={true}
+                value={dividerTemplate}
+                onChangeText={setDividerTemplate}
                 placeholder="Leave blank for no line"
               />
               <View style={styles.modalButtons}>
@@ -858,20 +871,20 @@ const DashboardScreen = ({ onLogout, navigation }) => {
         <Modal visible={!!loginError} animationType="fade" transparent={true}>
           <View style={[styles.modalOverlay, { justifyContent: 'center', alignItems: 'center', backgroundColor: 'rgba(0,0,0,0.6)' }]}>
             <View style={[styles.modalContent, { width: '85%', borderRadius: 24, alignItems: 'center', padding: 30, paddingBottom: 30 }]}>
-              
+
               <XCircleIcon size={64} color="#ef4444" style={{ marginBottom: 15 }} />
               <Text style={[styles.modalTitle, { textAlign: 'center', marginBottom: 10, fontSize: 24 }]}>Login Failed</Text>
-              
+
               <Text style={{ fontSize: 16, color: '#4b5563', textAlign: 'center', marginBottom: 25, lineHeight: 22 }}>
                 {loginError || "Your FEeLS username or password seems to be incorrect."}
               </Text>
-              
+
               <TouchableOpacity
-                style={{ 
-                  width: '100%', 
-                  backgroundColor: '#ef4444', 
-                  paddingVertical: 15, 
-                  borderRadius: 12, 
+                style={{
+                  width: '100%',
+                  backgroundColor: '#ef4444',
+                  paddingVertical: 15,
+                  borderRadius: 12,
                   alignItems: 'center',
                   marginTop: 5
                 }}
@@ -893,21 +906,21 @@ const DashboardScreen = ({ onLogout, navigation }) => {
         <Modal visible={!!successMessage} animationType="fade" transparent={true}>
           <View style={[styles.modalOverlay, { justifyContent: 'center', alignItems: 'center', backgroundColor: 'rgba(0,0,0,0.6)' }]}>
             <View style={[styles.modalContent, { width: '85%', borderRadius: 24, alignItems: 'center', padding: 30, paddingBottom: 30 }]}>
-              
+
               {/* Green Success Icon */}
               <CheckCircleIcon size={64} color="#10b981" style={{ marginBottom: 15 }} />
               <Text style={[styles.modalTitle, { textAlign: 'center', marginBottom: 10, fontSize: 24 }]}>Saved!</Text>
-              
+
               <Text style={{ fontSize: 16, color: '#4b5563', textAlign: 'center', marginBottom: 25, lineHeight: 22 }}>
                 {successMessage}
               </Text>
-              
+
               <TouchableOpacity
-                style={{ 
-                  width: '100%', 
+                style={{
+                  width: '100%',
                   backgroundColor: '#10b981', // Matching green color
-                  paddingVertical: 15, 
-                  borderRadius: 12, 
+                  paddingVertical: 15,
+                  borderRadius: 12,
                   alignItems: 'center',
                   marginTop: 5
                 }}
@@ -927,9 +940,9 @@ const DashboardScreen = ({ onLogout, navigation }) => {
             ref={webviewRef} source={{ uri: 'https://feels.pdn.ac.lk/calendar/view.php?view=upcoming' }}
             onNavigationStateChange={(navState) => {
               const url = navState.url;
-              if (navState.loading) return; 
-              if (url.includes('login/index.php')) { 
-                setStatus('Logging in...'); 
+              if (navState.loading) return;
+              if (url.includes('login/index.php')) {
+                setStatus('Logging in...');
                 webviewRef.current.injectJavaScript(`
                   setTimeout(function() {
                     var errorAlert = document.querySelector('.alert-danger, .error, #loginerrormessage');
@@ -961,12 +974,12 @@ const DashboardScreen = ({ onLogout, navigation }) => {
                     }
                   }, 1000);
                   true;
-                `); 
+                `);
               }
               else if (url.includes('my/') || url.includes('dashboard') || url === 'https://feels.pdn.ac.lk/' || url === 'https://feels.pdn.ac.lk/?' || url.includes('?redirect=')) { setStatus('Routing to calendar...'); webviewRef.current.injectJavaScript(`window.location.href = 'https://feels.pdn.ac.lk/calendar/view.php?view=upcoming';`); }
               else if (url.includes('calendar/view.php')) { setStatus('Scanning FEeLS...'); webviewRef.current.injectJavaScript(`setTimeout(function(){try{var e=document.querySelectorAll('.event, .calendar_event_course'),r=[];e.forEach(function(ev){if(ev.parentElement&&ev.parentElement.closest('.event, .calendar_event_course'))return;var t=ev.innerText.replace(/\\n/g,' ').trim();if(t&&!r.includes(t))r.push(t);});window.ReactNativeWebView.postMessage(JSON.stringify({type:'SCRAPED_DATA',data:r}));}catch(er){window.ReactNativeWebView.postMessage(JSON.stringify({type:'ERROR',message:er.message}));}},1500);true;`); }
             }}
-            onMessage={handleMessage} 
+            onMessage={handleMessage}
             javaScriptEnabled={true}
 
             incognito={false}
@@ -991,7 +1004,7 @@ const styles = StyleSheet.create({
   statusBox: { flexDirection: 'row', alignItems: 'center', backgroundColor: '#eef2ff', paddingVertical: 8, paddingHorizontal: 16, alignSelf: 'center', borderRadius: 20, marginBottom: 15 },
   statusIcon: { marginRight: 8 },
   statusText: { fontSize: 14, color: '#3730a3', fontWeight: '600' },
-  
+
   // ✨ NEW: Notes Styles ✨
   sectionTitle: { fontSize: 18, fontWeight: '800', color: '#111827', marginBottom: 10, letterSpacing: -0.3 },
   notesSection: { marginBottom: 10, paddingHorizontal: 20 },
@@ -1008,18 +1021,18 @@ const styles = StyleSheet.create({
   filterText: { color: '#4b5563', fontSize: 12, fontWeight: '700' },
   filterTextActive: { color: '#fff' },
 
-  scrollPadding: { paddingBottom: 100 }, 
+  scrollPadding: { paddingBottom: 100 },
   emptyState: { alignItems: 'center', marginTop: 30 },
   emptyStateIcon: { marginBottom: 15 },
   placeholderText: { color: '#666', fontSize: 16, fontWeight: 'bold' },
-  
+
   cardWrapper: { marginBottom: 15, borderRadius: 16, backgroundColor: '#fff', shadowColor: '#000', shadowOffset: { width: 0, height: 2 }, shadowOpacity: 0.05, shadowRadius: 5, elevation: 3, marginHorizontal: 20 },
   swipeContainer: { borderRadius: 16 },
   card: { backgroundColor: '#fff', padding: 20, borderRadius: 16 },
-  cardSafe: { borderLeftWidth: 6, borderLeftColor: '#3b82f6' }, 
-  cardWarning: { borderLeftWidth: 6, borderLeftColor: '#f59e0b' }, 
-  cardUrgent: { borderLeftWidth: 6, borderLeftColor: '#ef4444' }, 
-  cardOverdue: { borderLeftWidth: 6, borderLeftColor: '#9ca3af', opacity: 0.7 }, 
+  cardSafe: { borderLeftWidth: 6, borderLeftColor: '#3b82f6' },
+  cardWarning: { borderLeftWidth: 6, borderLeftColor: '#f59e0b' },
+  cardUrgent: { borderLeftWidth: 6, borderLeftColor: '#ef4444' },
+  cardOverdue: { borderLeftWidth: 6, borderLeftColor: '#9ca3af', opacity: 0.7 },
   cardHeader: { flexDirection: 'row', justifyContent: 'space-between', marginBottom: 8 },
   moduleBadge: { backgroundColor: '#f3f4f6', paddingHorizontal: 10, paddingVertical: 4, borderRadius: 8 },
   moduleBadgeText: { fontSize: 12, fontWeight: 'bold', color: '#4b5563', textTransform: 'uppercase' },
@@ -1032,18 +1045,18 @@ const styles = StyleSheet.create({
   swipeDeleteAction: { width: 80, justifyContent: 'center', alignItems: 'center', borderRadius: 16, marginBottom: 15, backgroundColor: '#ef4444' },
   swipeEditAction: { width: 80, justifyContent: 'center', alignItems: 'center', borderRadius: 16, marginBottom: 15, backgroundColor: '#3b82f6' },
   swipeActionText: { color: '#fff', fontWeight: 'bold', fontSize: 12, marginTop: 5 },
-  
+
   fab: { position: 'absolute', bottom: 30, right: 20, backgroundColor: '#000', width: 60, height: 60, borderRadius: 30, justifyContent: 'center', alignItems: 'center', shadowColor: '#000', shadowOffset: { width: 0, height: 4 }, shadowOpacity: 0.3, shadowRadius: 5, elevation: 8 },
-  
+
   undoWrapper: { position: 'absolute', bottom: 30, alignSelf: 'center', width: '70%', elevation: 6, shadowColor: '#000', shadowOffset: { width: 0, height: 4 }, shadowOpacity: 0.3, shadowRadius: 5 },
   undoContainer: { backgroundColor: '#333', flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingVertical: 12, paddingHorizontal: 20, borderRadius: 25 },
   undoText: { color: '#fff', fontSize: 14 },
   undoBtnText: { color: '#fbbf24', fontWeight: 'bold', fontSize: 14 },
-  
+
   modalOverlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.5)', justifyContent: 'flex-end' },
   modalContent: { backgroundColor: '#fff', borderTopLeftRadius: 24, borderTopRightRadius: 24, padding: 25, paddingBottom: 40, elevation: 10 },
   modalTitle: { fontSize: 22, fontWeight: '800', marginBottom: 20, color: '#111827' },
-  
+
   // ✨ NEW: Note Modal Specific Styles ✨
   noteModalHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20 },
   trashBtn: { padding: 5 },
