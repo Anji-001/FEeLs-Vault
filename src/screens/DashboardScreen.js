@@ -18,6 +18,8 @@ import {
   ClockIcon,
   Cog6ToothIcon,
   PlusIcon,
+  PencilIcon,
+  PencilSquareIcon,
   ShareIcon,
   TrashIcon,
   XCircleIcon,
@@ -141,6 +143,7 @@ const DashboardScreen = ({ onLogout, navigation }) => {
   const [editingNoteId, setEditingNoteId] = useState(null);
 
   let rowRefs = new Map();
+
 
   useEffect(() => {
     const loadData = async () => {
@@ -318,12 +321,24 @@ const DashboardScreen = ({ onLogout, navigation }) => {
     if (itemToDelete?.source === 'custom') {
       removeCustomDeadline(itemToDelete.id);
     } else {
-      // ✨ NEW: If it's a FEeLS task, blacklist it!
+      // If it's a FEeLS task, blacklist it so it doesn't reappear on next sync
       addToBlacklist(itemToDelete); 
     }
   };
 
-  const handleUndo = () => {
+  const removeFromBlacklist = async (item) => {
+    try {
+      const savedStr = await AsyncStorage.getItem('@hidden_feels_tasks');
+      const hiddenList = savedStr ? JSON.parse(savedStr) : [];
+      const signature = `${item.subject}-${item.description}`;
+      const updatedList = hiddenList.filter(sig => sig !== signature);
+      await AsyncStorage.setItem('@hidden_feels_tasks', JSON.stringify(updatedList));
+    } catch (error) {
+      console.error('Error removing task from blacklist', error);
+    }
+  };
+
+  const handleUndo = async () => {
     if (lastDeleted) {
       setDeadlines(prev => {
         const newList = [...prev];
@@ -333,6 +348,9 @@ const DashboardScreen = ({ onLogout, navigation }) => {
       scheduleDeadlineReminder(lastDeleted.item.subject, lastDeleted.item.description, lastDeleted.item.deadline);
       if (lastDeleted.item?.source === 'custom') {
         upsertCustomDeadline({ ...lastDeleted.item, source: 'custom' });
+      } else if (lastDeleted.item?.source === 'feels') {
+        // Remove from blacklist so the task survives an app restart
+        await removeFromBlacklist(lastDeleted.item);
       }
       setLastDeleted(null);
     }
@@ -517,25 +535,30 @@ const DashboardScreen = ({ onLogout, navigation }) => {
     }
   };
 
-  const renderRightActions = (progress, dragX, index) => {
-    const scale = dragX.interpolate({ inputRange: [-100, 0], outputRange: [1, 0], extrapolate: 'clamp' });
+
+  const renderRightActions = (_progress, _dragX, index) => {
     return (
-      <View style={styles.deleteSwipeBackground}>
-        <TouchableOpacity onPress={() => handleRemoveDeadline(index)} style={styles.deleteSwipeBtn}>
-          <Animated.Text style={[styles.swipeText, { transform: [{ scale }] }]}>Delete</Animated.Text>
-        </TouchableOpacity>
-      </View>
+      <TouchableOpacity
+        style={styles.swipeDeleteAction}
+        onPress={() => handleRemoveDeadline(index)}
+        activeOpacity={0.8}
+      >
+        <TrashIcon size={22} color="#fff" />
+        <Text style={styles.swipeActionText}>Delete</Text>
+      </TouchableOpacity>
     );
   };
 
-  const renderLeftActions = (progress, dragX, index) => {
-    const scale = dragX.interpolate({ inputRange: [0, 100], outputRange: [0, 1], extrapolate: 'clamp' });
+  const renderLeftActions = (_progress, _dragX, index) => {
     return (
-      <View style={styles.editSwipeBackground}>
-        <TouchableOpacity onPress={() => handleEditClick(index)} style={styles.editSwipeBtn}>
-          <Animated.Text style={[styles.swipeText, { transform: [{ scale }] }]}>Edit</Animated.Text>
-        </TouchableOpacity>
-      </View>
+      <TouchableOpacity
+        style={styles.swipeEditAction}
+        onPress={() => handleEditClick(index)}
+        activeOpacity={0.8}
+      >
+        <PencilIcon size={22} color="#fff" />
+        <Text style={styles.swipeActionText}>Edit</Text>
+      </TouchableOpacity>
     );
   };
 
@@ -687,9 +710,8 @@ const DashboardScreen = ({ onLogout, navigation }) => {
                   ref={ref => { if (ref && !rowRefs.get(index)) { rowRefs.set(index, ref); } }}
                   renderLeftActions={(progress, dragX) => renderLeftActions(progress, dragX, index)}
                   renderRightActions={(progress, dragX) => renderRightActions(progress, dragX, index)}
-                  onSwipeableLeftOpen={() => handleEditClick(index)}
-                  onSwipeableRightOpen={() => handleRemoveDeadline(index)}
-                  leftThreshold={70} rightThreshold={70} overshootRight={false} overshootLeft={false}
+                  overshootLeft={false}
+                  overshootRight={false}
                   containerStyle={styles.swipeContainer}
                 >
                   <View style={[styles.card, getUrgencyStyle(item.deadline)]}>
@@ -721,16 +743,10 @@ const DashboardScreen = ({ onLogout, navigation }) => {
 
         {lastDeleted && (
           <Reanimated.View entering={FadeInDown.duration(300)} exiting={FadeOut.duration(200)} style={styles.undoWrapper}>
-            <Swipeable
-              onSwipeableOpen={() => setLastDeleted(null)} 
-              renderLeftActions={() => <View style={{ flex: 1 }} />} renderRightActions={() => <View style={{ flex: 1 }} />}
-              leftThreshold={50} rightThreshold={50}
-            >
-              <View style={styles.undoContainer}>
-                <Text style={styles.undoText}>Task deleted</Text>
-                <TouchableOpacity onPress={handleUndo}><Text style={styles.undoBtnText}>UNDO</Text></TouchableOpacity>
-              </View>
-            </Swipeable>
+            <View style={styles.undoContainer}>
+              <Text style={styles.undoText}>Task deleted</Text>
+              <TouchableOpacity onPress={handleUndo}><Text style={styles.undoBtnText}>UNDO</Text></TouchableOpacity>
+            </View>
           </Reanimated.View>
         )}
 
@@ -998,7 +1014,7 @@ const styles = StyleSheet.create({
   placeholderText: { color: '#666', fontSize: 16, fontWeight: 'bold' },
   
   cardWrapper: { marginBottom: 15, borderRadius: 16, backgroundColor: '#fff', shadowColor: '#000', shadowOffset: { width: 0, height: 2 }, shadowOpacity: 0.05, shadowRadius: 5, elevation: 3, marginHorizontal: 20 },
-  swipeContainer: { borderRadius: 16, overflow: 'hidden' }, 
+  swipeContainer: { borderRadius: 16 },
   card: { backgroundColor: '#fff', padding: 20, borderRadius: 16 },
   cardSafe: { borderLeftWidth: 6, borderLeftColor: '#3b82f6' }, 
   cardWarning: { borderLeftWidth: 6, borderLeftColor: '#f59e0b' }, 
@@ -1012,13 +1028,10 @@ const styles = StyleSheet.create({
   footerItem: { flexDirection: 'row', alignItems: 'center' },
   footerIcon: { marginRight: 6 },
   cardTime: { fontSize: 13, color: '#6b7280', fontWeight: '500' },
-  cardLeft: { fontSize: 13, color: '#10b981', fontWeight: '700' }, 
-  
-  deleteSwipeBackground: { backgroundColor: '#ef4444', justifyContent: 'center', flex: 1 },
-  editSwipeBackground: { backgroundColor: '#3b82f6', justifyContent: 'center', flex: 1 },
-  deleteSwipeBtn: { alignItems: 'flex-end', paddingRight: 25, width: '100%', height: '100%', justifyContent: 'center' },
-  editSwipeBtn: { alignItems: 'flex-start', paddingLeft: 25, width: '100%', height: '100%', justifyContent: 'center' },
-  swipeText: { color: '#fff', fontWeight: 'bold', fontSize: 15 },
+  cardLeft: { fontSize: 13, color: '#10b981', fontWeight: '700' },
+  swipeDeleteAction: { width: 80, justifyContent: 'center', alignItems: 'center', borderRadius: 16, marginBottom: 15, backgroundColor: '#ef4444' },
+  swipeEditAction: { width: 80, justifyContent: 'center', alignItems: 'center', borderRadius: 16, marginBottom: 15, backgroundColor: '#3b82f6' },
+  swipeActionText: { color: '#fff', fontWeight: 'bold', fontSize: 12, marginTop: 5 },
   
   fab: { position: 'absolute', bottom: 30, right: 20, backgroundColor: '#000', width: 60, height: 60, borderRadius: 30, justifyContent: 'center', alignItems: 'center', shadowColor: '#000', shadowOffset: { width: 0, height: 4 }, shadowOpacity: 0.3, shadowRadius: 5, elevation: 8 },
   
