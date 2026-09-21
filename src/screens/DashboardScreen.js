@@ -6,17 +6,22 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import CookieManager from '@react-native-cookies/cookies';
 import DateTimePicker from '@react-native-community/datetimepicker';
 import notifee, { AuthorizationStatus, TimestampTrigger, TriggerType } from '@notifee/react-native';
-import { parseDeadlineString } from '../utils/parser';
+import { parseDeadlineString, parseCoursePageHtml, parseAllCoursePages } from '../utils/parser';
+import { getCourseScraperScript } from '../utils/courseFetcher';
 import { Swipeable } from 'react-native-gesture-handler';
 import Reanimated, { FadeInDown, FadeOut, LinearTransition, ZoomIn } from 'react-native-reanimated';
 import BootSplash from "react-native-bootsplash";
 import Clipboard from '@react-native-clipboard/clipboard';
 import {
+  AcademicCapIcon,
   ArchiveBoxIcon,
   CalendarDaysIcon,
   CheckCircleIcon,
+  ChevronDownIcon,
   ClockIcon,
+  CodeBracketIcon,
   Cog6ToothIcon,
+  LockClosedIcon,
   PlusIcon,
   PencilIcon,
   PencilSquareIcon,
@@ -121,6 +126,7 @@ const getDeadlineCategory = (item) => {
 
 const DashboardScreen = ({ onLogout, navigation }) => {
   const webviewRef = useRef(null);
+  const rowRefs = useRef(new Map());
   const [credentials, setCredentials] = useState(null);
   const [status, setStatus] = useState('Unlocking vault...');
 
@@ -155,8 +161,26 @@ const DashboardScreen = ({ onLogout, navigation }) => {
   const [noteContent, setNoteContent] = useState('');
   const [editingNoteId, setEditingNoteId] = useState(null);
 
-  let rowRefs = new Map();
+  // Semester States
+  const [availableSemesters, setAvailableSemesters] = useState([]);
+  const [selectedSemester, setSelectedSemester] = useState(null);
+  const [showSemesterModal, setShowSemesterModal] = useState(false);
 
+  // 🔍 DEBUG & HTML INSPECTOR STATES
+  const [debugDashboardHtml, setDebugDashboardHtml] = useState('');
+  const [debugCourseHtml, setDebugCourseHtml] = useState('');
+  const [debugHtmlTab, setDebugHtmlTab] = useState('course'); // 'course' | 'dashboard'
+  const [showDebugHtmlModal, setShowDebugHtmlModal] = useState(false);
+
+  const syncWatchdogTimer = useRef(null);
+
+  useEffect(() => {
+    return () => {
+      if (syncWatchdogTimer.current) {
+        clearTimeout(syncWatchdogTimer.current);
+      }
+    };
+  }, []);
 
   useEffect(() => {
     const loadData = async () => {
@@ -167,12 +191,13 @@ const DashboardScreen = ({ onLogout, navigation }) => {
 
       // Load saved templates and notes
       try {
-        const [savedHeader, savedItem, savedOffset, savedDivider, savedNotes] = await Promise.all([
+        const [savedHeader, savedItem, savedOffset, savedDivider, savedNotes, savedSemesterStr] = await Promise.all([
           AsyncStorage.getItem('@header_template'),
           AsyncStorage.getItem('@item_template'),
           AsyncStorage.getItem('@reminder_offset'),
           AsyncStorage.getItem('@divider_template'),
           AsyncStorage.getItem('@saved_notes'),
+          AsyncStorage.getItem('@selected_semester'),
         ]);
 
         if (savedHeader) setHeaderTemplate(savedHeader);
@@ -183,8 +208,29 @@ const DashboardScreen = ({ onLogout, navigation }) => {
           const parsedNotes = JSON.parse(savedNotes);
           if (Array.isArray(parsedNotes)) setNotes(parsedNotes);
         }
+        if (savedSemesterStr) {
+          try {
+            const parsedSemester = JSON.parse(savedSemesterStr);
+            setSelectedSemester(parsedSemester);
+          } catch (e) {
+            console.error('Failed to parse saved semester', e);
+          }
+        }
       } catch (error) {
         console.error('Failed to load settings or notes', error);
+      }
+
+      // ✨ Retrieve and display cached tasks immediately so deadlines are instantly visible offline ✨
+      try {
+        const cachedTasksStr = await AsyncStorage.getItem('@cached_tasks');
+        if (cachedTasksStr) {
+          const parsedCached = JSON.parse(cachedTasksStr);
+          if (Array.isArray(parsedCached) && parsedCached.length > 0) {
+            setDeadlines(parsedCached);
+          }
+        }
+      } catch (e) {
+        console.error("Failed to load @cached_tasks on boot", e);
       }
 
       // ✨ Load cached deadlines so the list isn't blank during sync ✨
@@ -218,6 +264,30 @@ const DashboardScreen = ({ onLogout, navigation }) => {
 
     setShowSettings(false); // Close the settings menu
     setSuccessMessage("Your settings have been saved successfully!"); // ✨ Trigger custom modal
+  };
+
+  const handleSelectSemester = async (semester) => {
+    try {
+      await AsyncStorage.setItem('@selected_semester', JSON.stringify(semester));
+      setSelectedSemester(semester);
+      setShowSemesterModal(false);
+      setRefreshing(true);
+      setStatus(`Syncing ${semester.title}...`);
+
+      if (syncWatchdogTimer.current) clearTimeout(syncWatchdogTimer.current);
+      syncWatchdogTimer.current = setTimeout(() => {
+        setRefreshing(false);
+        setStatus('Sync timed out. Pull down to retry.');
+      }, 15000);
+
+      if (webviewRef.current) {
+        webviewRef.current.injectJavaScript(getCourseScraperScript(semester.id || semester.title));
+      }
+    } catch (error) {
+      console.error('Failed to save selected semester', error);
+      setStatus(`Error: ${error.message || 'Failed to select semester'}`);
+      setRefreshing(false);
+    }
   };
 
   const handleLogout = async () => {
@@ -325,8 +395,9 @@ const DashboardScreen = ({ onLogout, navigation }) => {
   };
 
   const handleRemoveDeadline = (indexToRemove) => {
-    if (rowRefs.get(indexToRemove)) rowRefs.get(indexToRemove).close();
     const itemToDelete = deadlines[indexToRemove];
+    const ref = rowRefs.current.get(itemToDelete?.id) || rowRefs.current.get(indexToRemove);
+    if (ref) ref.close();
     cancelAlarm(itemToDelete.subject, itemToDelete.deadline).catch(e => { });
     setLastDeleted({ item: itemToDelete, index: indexToRemove });
     setDeadlines(prev => prev.filter((_, index) => index !== indexToRemove));
@@ -395,8 +466,9 @@ const DashboardScreen = ({ onLogout, navigation }) => {
   const onChangePicker = (event, selectedDate) => { setShowPicker(false); if (selectedDate) setCustomDate(selectedDate); };
 
   const handleEditClick = (index) => {
-    if (rowRefs.get(index)) rowRefs.get(index).close();
     const itemToEdit = deadlines[index];
+    const ref = rowRefs.current.get(itemToEdit?.id) || rowRefs.current.get(index);
+    if (ref) ref.close();
     setEditingIndex(index);
     setNewSubject(itemToEdit.subject);
     setNewDesc(itemToEdit.description);
@@ -472,16 +544,140 @@ const DashboardScreen = ({ onLogout, navigation }) => {
     });
   };
 
-  const onRefresh = useCallback(() => { setRefreshing(true); setStatus('Refreshing FEeLS data...'); if (webviewRef.current) webviewRef.current.reload(); }, []);
+  const onRefresh = useCallback(() => {
+    setRefreshing(true);
+    setStatus('Refreshing FEeLS data...');
 
-  // ✨ NEW: Notice we added the 'async' keyword here! ✨
+    if (syncWatchdogTimer.current) clearTimeout(syncWatchdogTimer.current);
+    syncWatchdogTimer.current = setTimeout(() => {
+      setRefreshing(false);
+      setStatus('Sync timed out. Pull down to retry.');
+    }, 15000);
+
+    if (webviewRef.current) {
+      webviewRef.current.reload();
+    } else {
+      setRefreshing(false);
+    }
+  }, []);
+
   const handleMessage = async (event) => {
+    if (syncWatchdogTimer.current) {
+      clearTimeout(syncWatchdogTimer.current);
+    }
+
     try {
       const parsed = JSON.parse(event.nativeEvent.data);
+      console.log('\n======================================================');
+      console.log(`[FEeLS METRO LOG] WebView Event Received: ${parsed.type}`);
+      console.log('======================================================');
+
+      if (parsed.dashboardHtml) {
+        setDebugDashboardHtml(parsed.dashboardHtml);
+      }
+
+      if (parsed.type === 'ERROR') {
+        const errMsg = parsed.message || 'Unknown error occurred during sync.';
+        console.error('[FEeLS Scraper Error]', errMsg);
+        setStatus(`Sync failed: ${errMsg}`);
+        setRefreshing(false);
+        return;
+      }
 
       if (parsed.type === 'LOGIN_FAILED') {
         setStatus('Login Failed 🚨');
         setLoginError(parsed.message);
+        setRefreshing(false);
+        return;
+      }
+
+      if (parsed.type === 'SEMESTERS_DISCOVERED') {
+        console.log('=== [FEeLS] EXTRACTED AVAILABLE SEMESTER LIST ===');
+        console.log(JSON.stringify(parsed.availableSemesters || [], null, 2));
+        console.log(`[FEeLS] Dashboard HTML captured (${parsed.dashboardHtml ? parsed.dashboardHtml.length : 0} chars).`);
+        setAvailableSemesters(parsed.availableSemesters || []);
+        if (!selectedSemester) {
+          setShowSemesterModal(true);
+          setStatus('Please select active semester');
+          setRefreshing(false);
+        } else {
+          webviewRef.current?.injectJavaScript(getCourseScraperScript(selectedSemester.id || selectedSemester.title));
+        }
+        return;
+      }
+
+      if (parsed.type === 'COURSE_PAGES_FETCHED') {
+        console.log('=== [FEeLS] EXTRACTED AVAILABLE SEMESTER LIST ===');
+        console.log(JSON.stringify(parsed.availableSemesters || [], null, 2));
+        console.log(`=== [FEeLS] FINAL FILTERED COURSE COUNT: ${parsed.coursesCount || 0} courses for "${parsed.selectedSemester?.title || selectedSemester?.title}" ===`);
+        
+        if (parsed.availableSemesters && parsed.availableSemesters.length > 0) {
+          setAvailableSemesters(parsed.availableSemesters);
+        }
+        if (parsed.selectedSemester) {
+          setSelectedSemester(parsed.selectedSemester);
+          AsyncStorage.setItem('@selected_semester', JSON.stringify(parsed.selectedSemester));
+        }
+
+        const eventData = parsed;
+        const firstHtml = eventData.sampleCourse?.html || (eventData.coursePages && eventData.coursePages[0]?.html);
+        if (firstHtml) {
+          setDebugCourseHtml(firstHtml);
+          console.log('\n--- RAW COURSE HTML START ---\n', firstHtml, '\n--- RAW COURSE HTML END ---\n');
+        } else {
+          console.log('[FEeLS] ⚠️ No course pages fetched (0 courses found or fetch returned empty). You can inspect the Dashboard HTML in the settings menu.');
+        }
+
+        // Parse activities across all fetched course pages
+        const [savedCustomStr, savedHiddenStr] = await Promise.all([
+          AsyncStorage.getItem(STORAGE_CUSTOM_DEADLINES),
+          AsyncStorage.getItem('@hidden_feels_tasks')
+        ]);
+
+        const customDeadlines = normalizeCustomDeadlines(savedCustomStr ? JSON.parse(savedCustomStr) : []);
+        const hiddenList = savedHiddenStr ? JSON.parse(savedHiddenStr) : [];
+
+        // Parse activities across all fetched course pages using parseAllCoursePages
+        const structuredData = parseAllCoursePages(eventData.coursePages || []);
+
+        // Save fresh tasks array to the cache immediately
+        await AsyncStorage.setItem('@cached_tasks', JSON.stringify(structuredData));
+
+        // Filter past deadlines
+        const validTasks = structuredData.filter(item => {
+          const targetDate = parseSafeDate(item.deadline);
+          if (isNaN(targetDate)) return true;
+          const msPastDeadline = Date.now() - targetDate.getTime();
+          const oneDayMs = 24 * 60 * 60 * 1000;
+          return msPastDeadline < oneDayMs;
+        });
+
+        // Filter out blacklisted tasks
+        const feelsDeadlines = normalizeFeelsDeadlines(validTasks).filter(item => {
+          const signature = `${item.subject}-${item.description}`;
+          return !hiddenList.includes(signature);
+        });
+
+        await AsyncStorage.setItem(STORAGE_CACHED_FEELS, JSON.stringify(feelsDeadlines));
+
+        const combinedData = [...feelsDeadlines, ...customDeadlines];
+        if (combinedData.length > 0) {
+          combinedData.sort((a, b) => {
+            const dateA = parseSafeDate(a.deadline);
+            const dateB = parseSafeDate(b.deadline);
+            const timeA = isNaN(dateA) ? 0 : dateA.getTime();
+            const timeB = isNaN(dateB) ? 0 : dateB.getTime();
+            return timeA - timeB;
+          });
+
+          setDeadlines(combinedData);
+          setStatus(`Synced ${feelsDeadlines.length} tasks (${parsed.coursesCount || 0} courses)`);
+          combinedData.forEach(item => scheduleDeadlineReminder(item.subject, item.description, item.deadline));
+        } else {
+          setDeadlines(customDeadlines);
+          setStatus(customDeadlines.length > 0 ? 'Deadlines Synced' : 'No upcoming deadlines.');
+        }
+
         return;
       }
 
@@ -542,9 +738,13 @@ const DashboardScreen = ({ onLogout, navigation }) => {
         }
       }
     } catch (e) {
-      setStatus('Error loading data.');
+      console.error('[FEeLS] Error handling message:', e);
+      setStatus(`Error: ${e.message || 'Error loading data'}`);
     } finally {
       setRefreshing(false);
+      if (syncWatchdogTimer.current) {
+        clearTimeout(syncWatchdogTimer.current);
+      }
     }
   };
 
@@ -643,11 +843,24 @@ const DashboardScreen = ({ onLogout, navigation }) => {
 
         {/* STATUS */}
         <View style={styles.statusBox}>
-          {status === 'Deadlines Synced' || status.includes('No actionable') || status.includes('No upcoming')
+          {status === 'Deadlines Synced' || status.includes('No actionable') || status.includes('No upcoming') || status.includes('Synced')
             ? <CheckCircleIcon size={16} color="#16a34a" style={styles.statusIcon} /> : <ActivityIndicator size="small" color="#0066cc" style={{ marginRight: 8 }} />
           }
           <Text style={styles.statusText}>{status}</Text>
         </View>
+
+        {/* ACTIVE SEMESTER BADGE / SWITCHER */}
+        <TouchableOpacity
+          style={styles.semesterBadge}
+          onPress={() => setShowSemesterModal(true)}
+          activeOpacity={0.8}
+        >
+          <AcademicCapIcon size={16} color="#4f46e5" style={{ marginRight: 6 }} />
+          <Text style={styles.semesterBadgeText} numberOfLines={1}>
+            {selectedSemester ? selectedSemester.title : (availableSemesters.length > 0 ? 'Select Active Semester' : 'Detecting Semester...')}
+          </Text>
+          <ChevronDownIcon size={14} color="#4f46e5" style={{ marginLeft: 4 }} />
+        </TouchableOpacity>
 
         <ScrollView
           contentContainerStyle={styles.scrollPadding}
@@ -720,7 +933,14 @@ const DashboardScreen = ({ onLogout, navigation }) => {
               (deadlineFilters.length === 0 || deadlineFilters.includes(getDeadlineCategory(item))) ?
                 <Reanimated.View key={item.id} style={styles.cardWrapper} entering={FadeInDown.duration(200)} exiting={FadeOut.duration(150)} layout={LinearTransition.duration(200)}>
                   <Swipeable
-                    ref={ref => { if (ref && !rowRefs.get(index)) { rowRefs.set(index, ref); } }}
+                    ref={ref => { if (ref && !rowRefs.current.get(item.id)) { rowRefs.current.set(item.id, ref); } }}
+                    onSwipeableWillOpen={() => {
+                      for (const [key, ref] of rowRefs.current.entries()) {
+                        if (key !== item.id && ref) {
+                          ref.close();
+                        }
+                      }
+                    }}
                     renderLeftActions={(progress, dragX) => renderLeftActions(progress, dragX, index)}
                     renderRightActions={(progress, dragX) => renderRightActions(progress, dragX, index)}
                     overshootLeft={false}
@@ -730,8 +950,21 @@ const DashboardScreen = ({ onLogout, navigation }) => {
                     <View style={[styles.card, getUrgencyStyle(item.deadline)]}>
                       <View style={styles.cardHeader}>
                         <View style={styles.moduleBadge}><Text style={styles.moduleBadgeText}>{item.subject}</Text></View>
+                        {item.isLocked ? (
+                          <View style={styles.lockBadge}>
+                            <LockClosedIcon size={12} color="#b45309" style={{ marginRight: 4 }} />
+                            <Text style={styles.lockBadgeText}>Restricted</Text>
+                          </View>
+                        ) : null}
                       </View>
                       <Text style={styles.cardTask}>{item.description}</Text>
+                      {item.isLocked && item.lockReason ? (
+                        <View style={styles.lockReasonContainer}>
+                          <Text style={styles.lockReasonText} numberOfLines={2}>
+                            🔒 {item.lockReason}
+                          </Text>
+                        </View>
+                      ) : null}
                       <View style={styles.cardFooter}>
                         <View style={styles.footerItem}><CalendarDaysIcon size={14} color="#6b7280" style={styles.footerIcon} /><Text style={styles.cardTime}>{item.deadline.split(' ')[0]}</Text></View>
                         <View style={styles.footerItem}>
@@ -856,6 +1089,40 @@ const DashboardScreen = ({ onLogout, navigation }) => {
                 onChangeText={setDividerTemplate}
                 placeholder="Leave blank for no line"
               />
+              <View style={{ marginTop: 15, marginBottom: 15 }}>
+                <Text style={styles.inputLabel}>Active Semester:</Text>
+                <TouchableOpacity
+                  style={styles.settingsSemesterBtn}
+                  onPress={() => {
+                    setShowSettings(false);
+                    setTimeout(() => setShowSemesterModal(true), 200);
+                  }}
+                >
+                  <Text style={styles.settingsSemesterBtnText} numberOfLines={1}>
+                    {selectedSemester ? selectedSemester.title : 'Choose Semester'}
+                  </Text>
+                  <ChevronDownIcon size={16} color="#4f46e5" />
+                </TouchableOpacity>
+              </View>
+
+              {/* ✨ NEW: Inspect Scraped HTML Button in Settings */}
+              <View style={{ marginBottom: 15 }}>
+                <Text style={styles.inputLabel}>Developer & Debug Tools:</Text>
+                <TouchableOpacity
+                  style={styles.inspectHtmlBtn}
+                  onPress={() => {
+                    setShowSettings(false);
+                    setTimeout(() => setShowDebugHtmlModal(true), 200);
+                  }}
+                  activeOpacity={0.8}
+                >
+                  <CodeBracketIcon size={20} color="#4f46e5" style={{ marginRight: 8 }} />
+                  <Text style={styles.inspectHtmlBtnText}>
+                    {debugCourseHtml || debugDashboardHtml ? '🔍 View Scraped HTML' : '🔍 View Scraped HTML (None Yet)'}
+                  </Text>
+                </TouchableOpacity>
+              </View>
+
               <View style={styles.modalButtons}>
                 <TouchableOpacity style={styles.cancelModalBtn} onPress={() => setShowSettings(false)}><Text style={styles.cancelModalBtnText}>Close</Text></TouchableOpacity>
                 <TouchableOpacity style={styles.saveModalBtn} onPress={saveTemplates}><Text style={styles.saveModalBtnText}>Save</Text></TouchableOpacity>
@@ -863,6 +1130,91 @@ const DashboardScreen = ({ onLogout, navigation }) => {
               <View style={styles.dangerZone}>
                 <TouchableOpacity onPress={handleLogout} style={styles.logoutBtn}><Text style={styles.logoutBtnText}>Logout & Clear Vault</Text></TouchableOpacity>
               </View>
+            </View>
+          </View>
+        </Modal>
+
+        {/* --- ✨ NEW: SCRAPED HTML INSPECTOR MODAL ✨ --- */}
+        <Modal visible={showDebugHtmlModal} animationType="slide" transparent={true}>
+          <View style={styles.modalOverlay}>
+            <View style={[styles.modalContent, { height: '88%' }]}>
+              <View style={styles.noteModalHeader}>
+                <View style={{ flex: 1, marginRight: 10 }}>
+                  <Text style={styles.modalTitle}>Scraped HTML Inspector</Text>
+                  <Text style={{ fontSize: 13, color: '#6b7280', marginTop: -15, marginBottom: 10 }}>
+                    Inspect raw HTML payloads captured from FEeLS
+                  </Text>
+                </View>
+                <TouchableOpacity onPress={() => setShowDebugHtmlModal(false)} style={styles.trashBtn}>
+                  <XCircleIcon size={26} color="#6b7280" />
+                </TouchableOpacity>
+              </View>
+
+              {/* Tab Selector */}
+              <View style={styles.debugTabsRow}>
+                <TouchableOpacity
+                  style={[styles.debugTabBtn, debugHtmlTab === 'course' && styles.debugTabBtnActive]}
+                  onPress={() => setDebugHtmlTab('course')}
+                >
+                  <Text style={[styles.debugTabBtnText, debugHtmlTab === 'course' && styles.debugTabBtnTextActive]}>
+                    Course Page HTML ({debugCourseHtml ? `${(debugCourseHtml.length / 1024).toFixed(1)} KB` : 'Empty'})
+                  </Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={[styles.debugTabBtn, debugHtmlTab === 'dashboard' && styles.debugTabBtnActive]}
+                  onPress={() => setDebugHtmlTab('dashboard')}
+                >
+                  <Text style={[styles.debugTabBtnText, debugHtmlTab === 'dashboard' && styles.debugTabBtnTextActive]}>
+                    Dashboard HTML ({debugDashboardHtml ? `${(debugDashboardHtml.length / 1024).toFixed(1)} KB` : 'Empty'})
+                  </Text>
+                </TouchableOpacity>
+              </View>
+
+              {/* Copy & Status Bar */}
+              <View style={styles.debugActionsBar}>
+                <Text style={styles.debugInfoText}>
+                  {debugHtmlTab === 'course'
+                    ? (debugCourseHtml ? `Showing raw HTML of first scraped course (${debugCourseHtml.length} chars)` : 'No course page scraped yet. Perform a sync!')
+                    : (debugDashboardHtml ? `Showing /my/ dashboard HTML (${debugDashboardHtml.length} chars)` : 'No dashboard HTML captured yet.')
+                  }
+                </Text>
+                <TouchableOpacity
+                  style={styles.debugCopyBtn}
+                  onPress={() => {
+                    const contentToCopy = debugHtmlTab === 'course' ? debugCourseHtml : debugDashboardHtml;
+                    if (!contentToCopy) {
+                      Alert.alert('Empty', 'No HTML content available to copy yet.');
+                      return;
+                    }
+                    Clipboard.setString(contentToCopy);
+                    Alert.alert('Copied!', `${debugHtmlTab === 'course' ? 'Course' : 'Dashboard'} HTML copied to clipboard.`);
+                  }}
+                >
+                  <DocumentDuplicateIcon size={16} color="#4f46e5" style={{ marginRight: 5 }} />
+                  <Text style={styles.debugCopyBtnText}>Copy HTML</Text>
+                </TouchableOpacity>
+              </View>
+
+              {/* Monospace HTML Code Container */}
+              <ScrollView
+                style={styles.debugCodeContainer}
+                contentContainerStyle={{ padding: 12 }}
+                showsVerticalScrollIndicator={true}
+              >
+                <Text style={styles.debugCodeText} selectable={true}>
+                  {debugHtmlTab === 'course'
+                    ? (debugCourseHtml || '<!-- No course page HTML captured yet. Pull down on dashboard to refresh/sync. -->')
+                    : (debugDashboardHtml || '<!-- No dashboard HTML captured yet. Pull down on dashboard to refresh/sync. -->')
+                  }
+                </Text>
+              </ScrollView>
+
+              <TouchableOpacity
+                style={[styles.cancelModalBtn, { marginTop: 15 }]}
+                onPress={() => setShowDebugHtmlModal(false)}
+              >
+                <Text style={styles.cancelModalBtnText}>Close Inspector</Text>
+              </TouchableOpacity>
             </View>
           </View>
         </Modal>
@@ -902,6 +1254,77 @@ const DashboardScreen = ({ onLogout, navigation }) => {
           </View>
         </Modal>
 
+        {/* --- ✨ NEW: SEMESTER SELECTION MODAL ✨ --- */}
+        <Modal visible={showSemesterModal} animationType="slide" transparent={true}>
+          <View style={styles.modalOverlay}>
+            <View style={[styles.modalContent, { maxHeight: '80%' }]}>
+              <View style={styles.noteModalHeader}>
+                <View style={{ flex: 1, marginRight: 10 }}>
+                  <Text style={styles.modalTitle}>Select Active Semester</Text>
+                  <Text style={{ fontSize: 13, color: '#6b7280', marginTop: -15, marginBottom: 10 }}>
+                    Choose which semester's courses to sync
+                  </Text>
+                </View>
+                <TouchableOpacity onPress={() => setShowSemesterModal(false)} style={styles.trashBtn}>
+                  <XCircleIcon size={26} color="#6b7280" />
+                </TouchableOpacity>
+              </View>
+
+              <ScrollView style={{ maxHeight: 350, marginBottom: 15 }} showsVerticalScrollIndicator={false}>
+                {availableSemesters.length > 0 ? (
+                  availableSemesters.map((sem) => {
+                    const isSelected = selectedSemester?.id === sem.id || selectedSemester?.title === sem.title;
+                    return (
+                      <TouchableOpacity
+                        key={sem.id}
+                        style={[
+                          styles.semesterOptionCard,
+                          isSelected && styles.semesterOptionCardActive
+                        ]}
+                        onPress={() => handleSelectSemester(sem)}
+                        activeOpacity={0.7}
+                      >
+                        <View style={{ flex: 1, marginRight: 10 }}>
+                          <Text style={[
+                            styles.semesterOptionTitle,
+                            isSelected && styles.semesterOptionTitleActive
+                          ]}>
+                            {sem.title}
+                          </Text>
+                          {sem.selector ? (
+                            <Text style={styles.semesterOptionSubtitle} numberOfLines={1}>
+                              Target: {sem.selector}
+                            </Text>
+                          ) : null}
+                        </View>
+                        {isSelected ? (
+                          <CheckCircleIcon size={24} color="#4f46e5" />
+                        ) : (
+                          <View style={styles.radioUnchecked} />
+                        )}
+                      </TouchableOpacity>
+                    );
+                  })
+                ) : (
+                  <View style={{ padding: 25, alignItems: 'center' }}>
+                    <ActivityIndicator size="small" color="#4f46e5" style={{ marginBottom: 10 }} />
+                    <Text style={{ color: '#6b7280', textAlign: 'center', fontSize: 14 }}>
+                      Detecting semester blocks from your dashboard...
+                    </Text>
+                  </View>
+                )}
+              </ScrollView>
+
+              <TouchableOpacity
+                style={styles.cancelModalBtn}
+                onPress={() => setShowSemesterModal(false)}
+              >
+                <Text style={styles.cancelModalBtnText}>Done</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </Modal>
+
         {/* --- ✨ NEW: CUSTOM SUCCESS MODAL ✨ --- */}
         <Modal visible={!!successMessage} animationType="fade" transparent={true}>
           <View style={[styles.modalOverlay, { justifyContent: 'center', alignItems: 'center', backgroundColor: 'rgba(0,0,0,0.6)' }]}>
@@ -937,7 +1360,22 @@ const DashboardScreen = ({ onLogout, navigation }) => {
 
         <View style={{ width: 0, height: 0, opacity: 0 }}>
           <WebView
-            ref={webviewRef} source={{ uri: 'https://feels.pdn.ac.lk/calendar/view.php?view=upcoming' }}
+            ref={webviewRef}
+            source={{ uri: 'https://feels.pdn.ac.lk/my/' }}
+            onError={(syntheticEvent) => {
+              const { nativeEvent } = syntheticEvent;
+              console.error('WebView error: ', nativeEvent);
+              setRefreshing(false);
+              if (syncWatchdogTimer.current) clearTimeout(syncWatchdogTimer.current);
+              setStatus(`Network error: ${nativeEvent.description || 'Connection failed'}`);
+            }}
+            onHttpError={(syntheticEvent) => {
+              const { nativeEvent } = syntheticEvent;
+              console.error('WebView HTTP error: ', nativeEvent);
+              setRefreshing(false);
+              if (syncWatchdogTimer.current) clearTimeout(syncWatchdogTimer.current);
+              setStatus(`Server error HTTP ${nativeEvent.statusCode}`);
+            }}
             onNavigationStateChange={(navState) => {
               const url = navState.url;
               if (navState.loading) return;
@@ -970,14 +1408,24 @@ const DashboardScreen = ({ onLogout, navigation }) => {
                       p.value = '${credentials.password}';
                       b.click();
                     } else {
-                      window.ReactNativeWebView.postMessage(JSON.stringify({type: 'ERROR', message: 'HTML elements not found.'}));
+                      window.ReactNativeWebView.postMessage(JSON.stringify({
+                        type: 'ERROR', 
+                        message: 'Login form elements (#username, #password, #loginbtn) not found.'
+                      }));
                     }
                   }, 1000);
                   true;
                 `);
               }
-              else if (url.includes('my/') || url.includes('dashboard') || url === 'https://feels.pdn.ac.lk/' || url === 'https://feels.pdn.ac.lk/?' || url.includes('?redirect=')) { setStatus('Routing to calendar...'); webviewRef.current.injectJavaScript(`window.location.href = 'https://feels.pdn.ac.lk/calendar/view.php?view=upcoming';`); }
-              else if (url.includes('calendar/view.php')) { setStatus('Scanning FEeLS...'); webviewRef.current.injectJavaScript(`setTimeout(function(){try{var e=document.querySelectorAll('.event, .calendar_event_course'),r=[];e.forEach(function(ev){if(ev.parentElement&&ev.parentElement.closest('.event, .calendar_event_course'))return;var t=ev.innerText.replace(/\\n/g,' ').trim();if(t&&!r.includes(t))r.push(t);});window.ReactNativeWebView.postMessage(JSON.stringify({type:'SCRAPED_DATA',data:r}));}catch(er){window.ReactNativeWebView.postMessage(JSON.stringify({type:'ERROR',message:er.message}));}},1500);true;`); }
+              else if (url.includes('my/') || url.includes('dashboard') || url === 'https://feels.pdn.ac.lk/' || url === 'https://feels.pdn.ac.lk/?' || url.includes('?redirect=')) {
+                setStatus('Scanning dashboard semesters...');
+                if (syncWatchdogTimer.current) clearTimeout(syncWatchdogTimer.current);
+                syncWatchdogTimer.current = setTimeout(() => {
+                  setRefreshing(false);
+                  setStatus('Sync timed out. Pull down to retry.');
+                }, 15000);
+                webviewRef.current.injectJavaScript(getCourseScraperScript(selectedSemester ? (selectedSemester.id || selectedSemester.title) : null));
+              }
             }}
             onMessage={handleMessage}
             javaScriptEnabled={true}
@@ -1001,9 +1449,36 @@ const styles = StyleSheet.create({
   title: { fontSize: 28, fontWeight: '900', color: '#1a1a1a', letterSpacing: -0.5 },
   headerButtons: { flexDirection: 'row', alignItems: 'center' },
   iconBtn: { padding: 10, marginLeft: 5 },
-  statusBox: { flexDirection: 'row', alignItems: 'center', backgroundColor: '#eef2ff', paddingVertical: 8, paddingHorizontal: 16, alignSelf: 'center', borderRadius: 20, marginBottom: 15 },
+  statusBox: { flexDirection: 'row', alignItems: 'center', backgroundColor: '#eef2ff', paddingVertical: 8, paddingHorizontal: 16, alignSelf: 'center', borderRadius: 20, marginBottom: 8 },
   statusIcon: { marginRight: 8 },
   statusText: { fontSize: 14, color: '#3730a3', fontWeight: '600' },
+
+  // ✨ NEW: Semester Badge & Picker Styles ✨
+  semesterBadge: { flexDirection: 'row', alignItems: 'center', backgroundColor: '#f5f3ff', paddingVertical: 6, paddingHorizontal: 14, alignSelf: 'center', borderRadius: 16, marginBottom: 15, borderWidth: 1, borderColor: '#ddd6fe' },
+  semesterBadgeText: { fontSize: 13, color: '#4f46e5', fontWeight: '700', maxWidth: 260 },
+  settingsSemesterBtn: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', backgroundColor: '#f5f3ff', borderWidth: 1, borderColor: '#ddd6fe', borderRadius: 12, padding: 15, marginBottom: 15 },
+  settingsSemesterBtnText: { fontSize: 15, color: '#4f46e5', fontWeight: '600', flex: 1, marginRight: 10 },
+  semesterOptionCard: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', backgroundColor: '#f9fafb', borderWidth: 1, borderColor: '#e5e7eb', borderRadius: 14, padding: 16, marginBottom: 10 },
+  semesterOptionCardActive: { backgroundColor: '#eef2ff', borderColor: '#6366f1', borderWidth: 1.5 },
+  semesterOptionTitle: { fontSize: 15, fontWeight: '700', color: '#1f2937', marginBottom: 3 },
+  semesterOptionTitleActive: { color: '#3730a3' },
+  semesterOptionSubtitle: { fontSize: 12, color: '#6b7280' },
+  radioUnchecked: { width: 22, height: 22, borderRadius: 11, borderWidth: 2, borderColor: '#d1d5db' },
+
+  // 🔍 Debug HTML Inspector Styles
+  inspectHtmlBtn: { flexDirection: 'row', alignItems: 'center', backgroundColor: '#eef2ff', borderWidth: 1, borderColor: '#c7d2fe', borderRadius: 12, padding: 14, marginBottom: 5 },
+  inspectHtmlBtnText: { fontSize: 14, color: '#4338ca', fontWeight: '700' },
+  debugTabsRow: { flexDirection: 'row', backgroundColor: '#f3f4f6', borderRadius: 12, padding: 4, marginBottom: 12 },
+  debugTabBtn: { flex: 1, paddingVertical: 8, paddingHorizontal: 6, borderRadius: 9, alignItems: 'center' },
+  debugTabBtnActive: { backgroundColor: '#fff', elevation: 2, shadowColor: '#000', shadowOffset: { width: 0, height: 1 }, shadowOpacity: 0.1, shadowRadius: 2 },
+  debugTabBtnText: { fontSize: 12, fontWeight: '600', color: '#6b7280' },
+  debugTabBtnTextActive: { color: '#4f46e5', fontWeight: '700' },
+  debugActionsBar: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8, paddingHorizontal: 4 },
+  debugInfoText: { fontSize: 11, color: '#6b7280', flex: 1, marginRight: 8 },
+  debugCopyBtn: { flexDirection: 'row', alignItems: 'center', backgroundColor: '#eef2ff', paddingVertical: 6, paddingHorizontal: 12, borderRadius: 8, borderWidth: 1, borderColor: '#c7d2fe' },
+  debugCopyBtnText: { fontSize: 12, fontWeight: '700', color: '#4f46e5' },
+  debugCodeContainer: { flex: 1, backgroundColor: '#1e293b', borderRadius: 12, borderWidth: 1, borderColor: '#334155', minHeight: 250 },
+  debugCodeText: { fontFamily: Platform.OS === 'android' ? 'monospace' : 'Courier', fontSize: 11, color: '#e2e8f0', lineHeight: 16 },
 
   // ✨ NEW: Notes Styles ✨
   sectionTitle: { fontSize: 18, fontWeight: '800', color: '#111827', marginBottom: 10, letterSpacing: -0.3 },
@@ -1033,9 +1508,13 @@ const styles = StyleSheet.create({
   cardWarning: { borderLeftWidth: 6, borderLeftColor: '#f59e0b' },
   cardUrgent: { borderLeftWidth: 6, borderLeftColor: '#ef4444' },
   cardOverdue: { borderLeftWidth: 6, borderLeftColor: '#9ca3af', opacity: 0.7 },
-  cardHeader: { flexDirection: 'row', justifyContent: 'space-between', marginBottom: 8 },
+  cardHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 },
   moduleBadge: { backgroundColor: '#f3f4f6', paddingHorizontal: 10, paddingVertical: 4, borderRadius: 8 },
   moduleBadgeText: { fontSize: 12, fontWeight: 'bold', color: '#4b5563', textTransform: 'uppercase' },
+  lockBadge: { flexDirection: 'row', alignItems: 'center', backgroundColor: '#fef3c7', paddingHorizontal: 8, paddingVertical: 3, borderRadius: 8, borderWidth: 1, borderColor: '#fde68a' },
+  lockBadgeText: { fontSize: 11, fontWeight: '700', color: '#b45309' },
+  lockReasonContainer: { backgroundColor: '#fffbeb', borderWidth: 1, borderColor: '#fef3c7', borderRadius: 8, padding: 8, marginBottom: 12 },
+  lockReasonText: { fontSize: 12, color: '#92400e', lineHeight: 16 },
   cardTask: { fontSize: 18, fontWeight: '700', color: '#111827', marginBottom: 15 },
   cardFooter: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', borderTopWidth: 1, borderTopColor: '#f3f4f6', paddingTop: 12 },
   footerItem: { flexDirection: 'row', alignItems: 'center' },
