@@ -312,6 +312,112 @@ export const parseCoursePageHtml = (rawHtml, defaultSubject = 'General') => {
 };
 
 /**
+ * Detects and extracts Perusall LTI activity launch URLs from Moodle course page HTML.
+ * Scans for any href containing 'mod/lti/view.php' associated with a Perusall or Reading activity.
+ * 
+ * @param {string} html - Raw HTML of the course page.
+ * @param {string} [baseUrl='https://feels.pdn.ac.lk'] - Base URL of the Moodle instance.
+ * @returns {string|null} Full Perusall LTI launch URL or null if none found.
+ */
+export const extractPerusallLtiUrl = (html, baseUrl = 'https://feels.pdn.ac.lk') => {
+  if (!html || typeof html !== 'string') return null;
+
+  try {
+    const cleanBaseUrl = baseUrl.replace(/\/+$/, '');
+
+    // 1. Anchor tags with mod/lti/view.php
+    const anchorRegex = /<a[^>]+href=["']([^"']*\/mod\/lti\/(?:view|launch)\.php\?[^"']*)["'][^>]*>([\s\S]*?)<\/a>/gi;
+    let match;
+    while ((match = anchorRegex.exec(html)) !== null) {
+      const rawHref = match[1];
+      const anchorContent = match[2];
+      const surroundingContext = html.slice(Math.max(0, match.index - 350), Math.min(html.length, match.index + 350));
+
+      const isPerusallOrReading = /perusall|reading/i.test(anchorContent) || /perusall|reading/i.test(surroundingContext);
+      if (isPerusallOrReading) {
+        return rawHref.startsWith('http') ? rawHref : `${cleanBaseUrl}/${rawHref.replace(/^\/+/, '')}`;
+      }
+    }
+
+    // 2. Activity containers containing mod/lti/view.php with perusall/reading indicators
+    const containerRegex = /<(?:li|div)[^>]*\bclass=["'][^"']*\b(?:activity|activity-item)\b[^"']*["'][^>]*>([\s\S]*?)<\/(?:li|div)>/gi;
+    let cMatch;
+    while ((cMatch = containerRegex.exec(html)) !== null) {
+      const block = cMatch[1];
+      if (/perusall|reading/i.test(block) && /\/mod\/lti\/(?:view|launch)\.php/i.test(block)) {
+        const hrefMatch = block.match(/href=["']([^"']*\/mod\/lti\/(?:view|launch)\.php\?[^"']*)["']/i);
+        if (hrefMatch && hrefMatch[1]) {
+          const rawHref = hrefMatch[1];
+          return rawHref.startsWith('http') ? rawHref : `${cleanBaseUrl}/${rawHref.replace(/^\/+/, '')}`;
+        }
+      }
+    }
+
+    // 3. Fallback direct regex match
+    const directMatch = html.match(/href=["'](https?:\/\/[^"']*\/mod\/lti\/(?:view|launch)\.php\?[^"']*(?:perusall|reading)[^"']*|[^"']*\/mod\/lti\/(?:view|launch)\.php\?[^"']*)["']/i);
+    if (directMatch && directMatch[1]) {
+      const rawHref = directMatch[1];
+      const context = html.slice(Math.max(0, directMatch.index - 250), Math.min(html.length, directMatch.index + 250));
+      if (/perusall|reading/i.test(context) || /perusall|reading/i.test(rawHref)) {
+        return rawHref.startsWith('http') ? rawHref : `${cleanBaseUrl}/${rawHref.replace(/^\/+/, '')}`;
+      }
+    }
+
+    return null;
+  } catch (err) {
+    console.error('[FEeLS Parser] Error in extractPerusallLtiUrl:', err);
+    return null;
+  }
+};
+
+/**
+ * Extracts course-level metadata (subject code, course title, and Perusall LTI launch URL) from course HTML.
+ * 
+ * @param {string} rawHtml - Raw HTML of the course page.
+ * @param {string} [defaultSubject='General'] - Fallback subject code.
+ * @param {string} [baseUrl='https://feels.pdn.ac.lk'] - Base URL of Moodle.
+ * @returns {{subject: string, title: string, perusallLtiUrl: string|null}}
+ */
+export const extractCourseMetadata = (rawHtml, defaultSubject = 'General', baseUrl = 'https://feels.pdn.ac.lk') => {
+  if (!rawHtml || typeof rawHtml !== 'string') {
+    return { subject: defaultSubject, title: defaultSubject, perusallLtiUrl: null };
+  }
+
+  try {
+    const subjectMatch = rawHtml.match(/\b([A-Z]{2,4}\d{3})\b/i);
+    const subject = subjectMatch ? subjectMatch[1].toUpperCase() : defaultSubject;
+
+    const h1Match = rawHtml.match(/<h1[^>]*>([\s\S]*?)<\/h1>/i);
+    const title = h1Match ? cleanActivityTitle(h1Match[1]) : subject;
+
+    const perusallLtiUrl = extractPerusallLtiUrl(rawHtml, baseUrl);
+
+    return {
+      subject,
+      title,
+      perusallLtiUrl,
+    };
+  } catch (error) {
+    console.error('[FEeLS Parser] Error in extractCourseMetadata:', error);
+    return { subject: defaultSubject, title: defaultSubject, perusallLtiUrl: null };
+  }
+};
+
+/**
+ * Parses course HTML and returns both extracted deadline tasks and course metadata (including perusallLtiUrl).
+ * 
+ * @param {string} rawHtml - Course page HTML.
+ * @param {string} [defaultSubject='General'] - Fallback subject code.
+ * @param {string} [baseUrl='https://feels.pdn.ac.lk'] - Base URL of Moodle.
+ * @returns {{metadata: {subject: string, title: string, perusallLtiUrl: string|null}, tasks: Array<Object>}}
+ */
+export const parseCoursePageWithMetadata = (rawHtml, defaultSubject = 'General', baseUrl = 'https://feels.pdn.ac.lk') => {
+  const metadata = extractCourseMetadata(rawHtml, defaultSubject, baseUrl);
+  const tasks = parseCoursePageHtml(rawHtml, defaultSubject);
+  return { metadata, tasks };
+};
+
+/**
  * Iterates through an array of course page objects, parses each course's HTML using parseCoursePageHtml,
  * and returns a single flattened array of all extracted tasks.
  * 
@@ -341,6 +447,39 @@ export const parseAllCoursePages = (coursePagesArray) => {
     console.error('[FEeLS Parser] Error in parseAllCoursePages:', error);
     return [];
   }
+};
+
+/**
+ * Iterates through course pages and returns all extracted tasks alongside per-course metadata.
+ * 
+ * @param {Array<{id?: string, url?: string, html: string}>} coursePagesArray
+ * @param {string} [baseUrl='https://feels.pdn.ac.lk']
+ * @returns {{courses: Array<{id?: string, url?: string, metadata: {subject: string, title: string, perusallLtiUrl: string|null}, tasks: Array<Object>}>, allTasks: Array<Object>}}
+ */
+export const parseAllCoursePagesWithMetadata = (coursePagesArray, baseUrl = 'https://feels.pdn.ac.lk') => {
+  if (!Array.isArray(coursePagesArray) || coursePagesArray.length === 0) {
+    return { courses: [], allTasks: [] };
+  }
+
+  const courses = [];
+  const allTasks = [];
+
+  for (const coursePage of coursePagesArray) {
+    if (!coursePage) continue;
+    const html = typeof coursePage === 'string' ? coursePage : coursePage.html;
+    if (html && typeof html === 'string') {
+      const { metadata, tasks } = parseCoursePageWithMetadata(html, 'General', baseUrl);
+      courses.push({
+        id: coursePage.id,
+        url: coursePage.url,
+        metadata,
+        tasks,
+      });
+      allTasks.push(...tasks);
+    }
+  }
+
+  return { courses, allTasks };
 };
 
 /**

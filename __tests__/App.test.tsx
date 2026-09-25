@@ -21,6 +21,57 @@ jest.mock('@react-native-async-storage/async-storage', () =>
   require('@react-native-async-storage/async-storage/jest/async-storage-mock')
 );
 
+jest.mock('react-native-webview', () => {
+  const React = require('react');
+  const { View } = require('react-native');
+  return {
+    __esModule: true,
+    default: React.forwardRef((props, ref) => {
+      React.useImperativeHandle(ref, () => ({
+        injectJavaScript: jest.fn(),
+        reload: jest.fn(),
+        clearCache: jest.fn(),
+      }));
+      return React.createElement(View, { testID: 'webview-mock', ...props });
+    }),
+  };
+});
+
+jest.mock('@notifee/react-native', () => ({
+  requestPermission: jest.fn().mockResolvedValue({}),
+  createChannel: jest.fn().mockResolvedValue('channel'),
+  createTriggerNotification: jest.fn().mockResolvedValue('notif'),
+  cancelNotification: jest.fn().mockResolvedValue(undefined),
+  cancelAllNotifications: jest.fn().mockResolvedValue(undefined),
+  TriggerType: { TIMESTAMP: 0 },
+}));
+
+jest.mock('@react-native-cookies/cookies', () => ({
+  clearAll: jest.fn().mockResolvedValue(true),
+  get: jest.fn().mockResolvedValue({}),
+}));
+
+jest.mock('@react-native-clipboard/clipboard', () => ({
+  setString: jest.fn(),
+  getString: jest.fn().mockResolvedValue(''),
+}));
+
+jest.mock('react-native-reanimated', () => {
+  const React = require('react');
+  const { View } = require('react-native');
+  return {
+    __esModule: true,
+    default: {
+      View: ({ children, ...props }) => React.createElement(View, props, children),
+    },
+    View: ({ children, ...props }) => React.createElement(View, props, children),
+    FadeInDown: { duration: jest.fn().mockReturnThis() },
+    FadeOut: { duration: jest.fn().mockReturnThis() },
+    LinearTransition: { duration: jest.fn().mockReturnThis() },
+    ZoomIn: { duration: jest.fn().mockReturnThis() },
+  };
+});
+
 import App from '../App';
 
 test('renders correctly', async () => {

@@ -35,6 +35,7 @@ jest.mock('@react-native-community/datetimepicker', () => {
 
 jest.mock('@react-native-cookies/cookies', () => ({
   clearAll: jest.fn().mockResolvedValue(true),
+  get: jest.fn().mockResolvedValue({}),
 }));
 
 jest.mock('@react-native-clipboard/clipboard', () => ({
@@ -158,6 +159,85 @@ describe('DashboardScreen WebView Integration', () => {
     expect(JSON.parse(cachedTasks)[0].description).toBe('Neural Networks Assignment 1');
   });
 
+  test('fetches from courseFetcher and perusallFetcher concurrently via Promise.all, merges and sorts chronologically', async () => {
+    const mockOnLogout = jest.fn();
+    const mockNavigation = { navigate: jest.fn() };
+
+    // FEeLS course due Sept 28, 2026
+    const mockCourseHtml = `
+      <html>
+        <body>
+          <h1>CO544 Machine Learning</h1>
+          <div class="activity-item">
+            <span class="instancename">FEeLS ML Assignment</span>
+            <div class="activity-dates">Due: Monday, 28 September 2026, 11:59 PM</div>
+          </div>
+        </body>
+      </html>
+    `;
+
+    // Mock Perusall with an earlier deadline (Sept 24, 2026)
+    const perusallFetcher = require('../src/utils/perusallFetcher');
+    const perusallSpy = jest.spyOn(perusallFetcher, 'fetchPerusallAssignments').mockResolvedValue([
+      {
+        id: 'perusall-p1',
+        subject: 'CO322',
+        description: 'Perusall Reading Chapter 2',
+        deadline: '9/24/2026 11:59 PM',
+        remaining: '3 days 5 hours',
+        isLocked: false,
+        lockReason: '',
+        source: 'perusall',
+      },
+    ]);
+
+    const { getByTestId, findByText, findAllByText } = render(
+      <DashboardScreen onLogout={mockOnLogout} navigation={mockNavigation} />
+    );
+
+    const webView = await waitFor(() => getByTestId('feels-webview'));
+    expect(webView).toBeTruthy();
+
+    const eventPayload = {
+      type: 'COURSE_PAGES_FETCHED',
+      availableSemesters: [
+        { id: 'sem-sep-2026', title: 'Semesters commenced in September 2026' },
+      ],
+      selectedSemester: {
+        id: 'sem-sep-2026',
+        title: 'Semesters commenced in September 2026',
+      },
+      coursesCount: 1,
+      coursePages: [
+        {
+          id: '701',
+          url: 'https://feels.pdn.ac.lk/course/view.php?id=701',
+          html: mockCourseHtml,
+        },
+      ],
+    };
+
+    fireEvent(webView, 'message', {
+      nativeEvent: { data: JSON.stringify(eventPayload) },
+    });
+
+    // Both FEeLS and Perusall items should be present on screen
+    const perusallTask = await findByText('Perusall Reading Chapter 2');
+    const feelsTask = await findByText('FEeLS ML Assignment');
+
+    expect(perusallTask).toBeTruthy();
+    expect(feelsTask).toBeTruthy();
+    expect(perusallSpy).toHaveBeenCalled();
+
+    // Verify @cached_tasks contains both items
+    const cachedTasks = JSON.parse(await AsyncStorage.getItem('@cached_tasks'));
+    expect(cachedTasks).toHaveLength(2);
+    expect(cachedTasks.some(t => t.description === 'Perusall Reading Chapter 2')).toBe(true);
+    expect(cachedTasks.some(t => t.description === 'FEeLS ML Assignment')).toBe(true);
+
+    perusallSpy.mockRestore();
+  });
+
   test('immediately retrieves and displays @cached_tasks on boot for offline visibility', async () => {
     const mockOnLogout = jest.fn();
     const mockNavigation = { navigate: jest.fn() };
@@ -184,4 +264,92 @@ describe('DashboardScreen WebView Integration', () => {
     const offlineTask = await findByText('Offline Cached Lab 1');
     expect(offlineTask).toBeTruthy();
   });
+
+  test('conditionally renders PerusallLtiBridge when perusallLtiUrl is discovered and cookies are missing, then syncs on onAuthSuccess', async () => {
+    const mockOnLogout = jest.fn();
+    const mockNavigation = { navigate: jest.fn() };
+
+    const mockCourseWithLti = `
+      <html>
+        <body>
+          <h1>CO544 Machine Learning</h1>
+          <div class="activity-item">
+            <a href="https://feels.pdn.ac.lk/mod/lti/view.php?id=99999">Perusall Course Reading</a>
+          </div>
+          <div class="activity-item">
+            <span class="instancename">FEeLS Homework 1</span>
+            <div class="activity-dates">Due: Monday, 28 September 2026, 11:59 PM</div>
+          </div>
+        </body>
+      </html>
+    `;
+
+    const perusallFetcher = require('../src/utils/perusallFetcher');
+    jest.spyOn(perusallFetcher, 'getPerusallCookies').mockResolvedValue('');
+    const fetchAssignmentsSpy = jest.spyOn(perusallFetcher, 'fetchPerusallAssignments').mockResolvedValue([
+      {
+        id: 'perusall-after-auth-1',
+        subject: 'CO544',
+        description: 'Perusall Chapter 3 Post-Auth',
+        deadline: '9/29/2026 11:59 PM',
+        remaining: '7 days 2 hours',
+        isLocked: false,
+        lockReason: '',
+        source: 'perusall',
+      },
+    ]);
+
+    const { getByTestId, findByText, queryByTestId } = render(
+      <DashboardScreen onLogout={mockOnLogout} navigation={mockNavigation} />
+    );
+
+    const webView = await waitFor(() => getByTestId('feels-webview'));
+
+    const eventPayload = {
+      type: 'COURSE_PAGES_FETCHED',
+      availableSemesters: [
+        { id: 'sem-sep-2026', title: 'Semesters commenced in September 2026' },
+      ],
+      coursesCount: 1,
+      coursePages: [
+        {
+          id: '701',
+          url: 'https://feels.pdn.ac.lk/course/view.php?id=701',
+          html: mockCourseWithLti,
+        },
+      ],
+    };
+
+    fireEvent(webView, 'message', {
+      nativeEvent: { data: JSON.stringify(eventPayload) },
+    });
+
+    // PerusallLtiBridge should be mounted because perusallLtiUrl was discovered and cookies were empty
+    const bridgeContainer = await waitFor(() => getByTestId('perusall-lti-bridge-container'));
+    expect(bridgeContainer).toBeTruthy();
+
+    const bridgeWebview = getByTestId('perusall-lti-webview');
+    expect(bridgeWebview.props.source).toEqual({ uri: 'https://feels.pdn.ac.lk/mod/lti/view.php?id=99999' });
+
+    // Simulate bridge landing on app.perusall.com and triggering onAuthSuccess
+    fireEvent(bridgeWebview, 'navigationStateChange', {
+      url: 'https://app.perusall.com/courses/c123/assignments',
+      loading: false,
+    });
+
+    // Check that Perusall assignments were fetched and rendered
+    const syncedTask = await findByText('Perusall Chapter 3 Post-Auth');
+    expect(syncedTask).toBeTruthy();
+    expect(fetchAssignmentsSpy).toHaveBeenCalled();
+
+    // Verify bridge was unmounted
+    await waitFor(() => {
+      expect(queryByTestId('perusall-lti-bridge-container')).toBeNull();
+    });
+
+    perusallFetcher.getPerusallCookies.mockRestore();
+    fetchAssignmentsSpy.mockRestore();
+  });
 });
+
+

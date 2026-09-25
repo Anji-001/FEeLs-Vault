@@ -1,4 +1,11 @@
-import { parseCoursePageHtml, parseDueDateString, parseAllCoursePages } from '../src/utils/parser';
+import {
+  parseCoursePageHtml,
+  parseDueDateString,
+  parseAllCoursePages,
+  extractPerusallLtiUrl,
+  extractCourseMetadata,
+  parseCoursePageWithMetadata,
+} from '../src/utils/parser';
 
 describe('parser utilities', () => {
   describe('parseDueDateString', () => {
@@ -251,4 +258,80 @@ describe('parser utilities', () => {
       expect(tasks[0].description).toBe('Valid Task');
     });
   });
+
+  describe('Perusall LTI activity link and course metadata detection', () => {
+    const courseWithPerusallHtml = `
+      <!DOCTYPE html>
+      <html>
+        <body>
+          <h1 class="page-header-headings">CO544 Machine Learning</h1>
+          <ul class="section">
+            <li class="activity lti modtype_lti" id="module-555">
+              <div class="activity-item">
+                <div class="activityname">
+                  <a class="aalink" href="https://feels.pdn.ac.lk/mod/lti/view.php?id=555">
+                    <span class="instancename">Perusall Course Readings E-Book</span>
+                  </a>
+                </div>
+              </div>
+            </li>
+            <li class="activity assign modtype_assign" id="module-101">
+              <div class="activity-item">
+                <span class="instancename">Assignment 1</span>
+                <div class="activity-dates">Due: Today 11:59 PM</div>
+              </div>
+            </li>
+          </ul>
+        </body>
+      </html>
+    `;
+
+    const courseWithRelativeLtiHtml = `
+      <div>
+        <h1>EE380 Control Systems</h1>
+        <div class="activity-item">
+          <a href="/mod/lti/view.php?id=888">Reading Assignment Chapter 4 (Perusall)</a>
+        </div>
+      </div>
+    `;
+
+    const courseWithoutPerusallHtml = `
+      <div>
+        <h1>CO322 Data Structures</h1>
+        <div class="activity-item">
+          <a href="/mod/lti/view.php?id=999">MATLAB Grader Online Tool</a>
+        </div>
+      </div>
+    `;
+
+    test('extractPerusallLtiUrl extracts full URL from Perusall LTI activities', () => {
+      const url1 = extractPerusallLtiUrl(courseWithPerusallHtml);
+      expect(url1).toBe('https://feels.pdn.ac.lk/mod/lti/view.php?id=555');
+
+      const url2 = extractPerusallLtiUrl(courseWithRelativeLtiHtml);
+      expect(url2).toBe('https://feels.pdn.ac.lk/mod/lti/view.php?id=888');
+    });
+
+    test('extractPerusallLtiUrl returns null if LTI activity is unrelated to Perusall or Reading', () => {
+      const url = extractPerusallLtiUrl(courseWithoutPerusallHtml);
+      expect(url).toBeNull();
+    });
+
+    test('extractCourseMetadata appends perusallLtiUrl property to course metadata', () => {
+      const metadata = extractCourseMetadata(courseWithPerusallHtml);
+      expect(metadata).toEqual({
+        subject: 'CO544',
+        title: 'CO544 Machine Learning',
+        perusallLtiUrl: 'https://feels.pdn.ac.lk/mod/lti/view.php?id=555',
+      });
+    });
+
+    test('parseCoursePageWithMetadata returns metadata with perusallLtiUrl and parsed tasks', () => {
+      const result = parseCoursePageWithMetadata(courseWithPerusallHtml);
+      expect(result.metadata.perusallLtiUrl).toBe('https://feels.pdn.ac.lk/mod/lti/view.php?id=555');
+      expect(result.tasks).toHaveLength(1);
+      expect(result.tasks[0].description).toBe('Assignment 1');
+    });
+  });
 });
+

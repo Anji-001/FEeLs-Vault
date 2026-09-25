@@ -6,8 +6,10 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import CookieManager from '@react-native-cookies/cookies';
 import DateTimePicker from '@react-native-community/datetimepicker';
 import notifee, { AuthorizationStatus, TimestampTrigger, TriggerType } from '@notifee/react-native';
-import { parseDeadlineString, parseCoursePageHtml, parseAllCoursePages } from '../utils/parser';
-import { getCourseScraperScript } from '../utils/courseFetcher';
+import { parseDeadlineString, parseCoursePageHtml, parseAllCoursePages, extractPerusallLtiUrl } from '../utils/parser';
+import { getCourseScraperScript, fetchCoursePages } from '../utils/courseFetcher';
+import { fetchPerusallAssignments, getPerusallCookies } from '../utils/perusallFetcher';
+import PerusallLtiBridge from '../components/PerusallLtiBridge';
 import { Swipeable } from 'react-native-gesture-handler';
 import Reanimated, { FadeInDown, FadeOut, LinearTransition, ZoomIn } from 'react-native-reanimated';
 import BootSplash from "react-native-bootsplash";
@@ -102,8 +104,31 @@ const normalizeFeelsDeadlines = (items) => {
   if (!Array.isArray(items)) return [];
   return items.map((item) => ({
     ...item,
-    source: 'feels',
+    source: item.source || 'feels',
   }));
+};
+
+/**
+ * Concurrently fetches and parses deadlines from both course pages/courseFetcher and Perusall API,
+ * merges the results, and sorts them chronologically.
+ */
+export const syncAllDeadlines = async (coursePages = [], perusallOptions = {}) => {
+  const [courseStructuredTasks, perusallAssignments] = await Promise.all([
+    Promise.resolve().then(() => parseAllCoursePages(coursePages)),
+    fetchPerusallAssignments(perusallOptions).catch((err) => {
+      console.warn('[Dashboard] Error fetching Perusall assignments:', err?.message || err);
+      return [];
+    }),
+  ]);
+
+  const merged = [...courseStructuredTasks, ...perusallAssignments];
+  return merged.sort((a, b) => {
+    const dateA = parseSafeDate(a.deadline);
+    const dateB = parseSafeDate(b.deadline);
+    const timeA = isNaN(dateA) ? Infinity : dateA.getTime();
+    const timeB = isNaN(dateB) ? Infinity : dateB.getTime();
+    return timeA - timeB;
+  });
 };
 
 const getUrgencyStyle = (deadlineStr) => {
@@ -145,6 +170,10 @@ const DashboardScreen = ({ onLogout, navigation }) => {
   const [deadlineFilters, setDeadlineFilters] = useState([]);
 
   const [dividerTemplate, setDividerTemplate] = useState('\n\n〰️〰️〰️〰️〰️〰️〰️〰️〰️\n\n');
+
+  // Perusall LTI Bridge Auth States
+  const [needsPerusallAuth, setNeedsPerusallAuth] = useState(false);
+  const [perusallLtiUrl, setPerusallLtiUrl] = useState(null);
 
   // Task Modal States
   const [showAddModal, setShowAddModal] = useState(false);
@@ -544,6 +573,39 @@ const DashboardScreen = ({ onLogout, navigation }) => {
     });
   };
 
+  const handlePerusallAuthSuccess = useCallback(async () => {
+    console.log('[Dashboard] Perusall LTI Auth succeeded. Unmounting bridge and fetching Perusall assignments...');
+    setNeedsPerusallAuth(false);
+    setPerusallLtiUrl(null);
+
+    try {
+      const newPerusallTasks = await fetchPerusallAssignments();
+      if (Array.isArray(newPerusallTasks) && newPerusallTasks.length > 0) {
+        setDeadlines((prev) => {
+          const nonPerusall = prev.filter((item) => item.source !== 'perusall');
+          const merged = [...nonPerusall, ...newPerusallTasks];
+          merged.sort((a, b) => {
+            const dateA = parseSafeDate(a.deadline);
+            const dateB = parseSafeDate(b.deadline);
+            const timeA = isNaN(dateA) ? Infinity : dateA.getTime();
+            const timeB = isNaN(dateB) ? Infinity : dateB.getTime();
+            return timeA - timeB;
+          });
+          return merged;
+        });
+
+        const cachedStr = await AsyncStorage.getItem('@cached_tasks');
+        const cachedTasks = cachedStr ? JSON.parse(cachedStr) : [];
+        const updatedCached = [...cachedTasks.filter((item) => item.source !== 'perusall'), ...newPerusallTasks];
+        await AsyncStorage.setItem('@cached_tasks', JSON.stringify(updatedCached));
+        setStatus('Perusall deadlines synced');
+        newPerusallTasks.forEach(item => scheduleDeadlineReminder(item.subject, item.description, item.deadline));
+      }
+    } catch (err) {
+      console.warn('[Dashboard] Error syncing Perusall assignments after auth:', err?.message || err);
+    }
+  }, []);
+
   const onRefresh = useCallback(() => {
     setRefreshing(true);
     setStatus('Refreshing FEeLS data...');
@@ -610,7 +672,7 @@ const DashboardScreen = ({ onLogout, navigation }) => {
         console.log('=== [FEeLS] EXTRACTED AVAILABLE SEMESTER LIST ===');
         console.log(JSON.stringify(parsed.availableSemesters || [], null, 2));
         console.log(`=== [FEeLS] FINAL FILTERED COURSE COUNT: ${parsed.coursesCount || 0} courses for "${parsed.selectedSemester?.title || selectedSemester?.title}" ===`);
-        
+
         if (parsed.availableSemesters && parsed.availableSemesters.length > 0) {
           setAvailableSemesters(parsed.availableSemesters);
         }
@@ -637,8 +699,16 @@ const DashboardScreen = ({ onLogout, navigation }) => {
         const customDeadlines = normalizeCustomDeadlines(savedCustomStr ? JSON.parse(savedCustomStr) : []);
         const hiddenList = savedHiddenStr ? JSON.parse(savedHiddenStr) : [];
 
-        // Parse activities across all fetched course pages using parseAllCoursePages
-        const structuredData = parseAllCoursePages(eventData.coursePages || []);
+        // Concurrently parse FEeLS course pages and fetch Perusall assignments via Promise.all
+        const [courseStructuredTasks, perusallAssignments] = await Promise.all([
+          Promise.resolve().then(() => parseAllCoursePages(eventData.coursePages || [])),
+          fetchPerusallAssignments().catch((err) => {
+            console.warn('[Dashboard] Error fetching Perusall assignments:', err?.message || err);
+            return [];
+          }),
+        ]);
+
+        const structuredData = [...courseStructuredTasks, ...perusallAssignments];
 
         // Save fresh tasks array to the cache immediately
         await AsyncStorage.setItem('@cached_tasks', JSON.stringify(structuredData));
@@ -653,29 +723,63 @@ const DashboardScreen = ({ onLogout, navigation }) => {
         });
 
         // Filter out blacklisted tasks
-        const feelsDeadlines = normalizeFeelsDeadlines(validTasks).filter(item => {
+        const syncedDeadlines = normalizeFeelsDeadlines(validTasks).filter(item => {
           const signature = `${item.subject}-${item.description}`;
           return !hiddenList.includes(signature);
         });
 
-        await AsyncStorage.setItem(STORAGE_CACHED_FEELS, JSON.stringify(feelsDeadlines));
+        await AsyncStorage.setItem(STORAGE_CACHED_FEELS, JSON.stringify(syncedDeadlines));
 
-        const combinedData = [...feelsDeadlines, ...customDeadlines];
+        const combinedData = [...syncedDeadlines, ...customDeadlines];
         if (combinedData.length > 0) {
           combinedData.sort((a, b) => {
             const dateA = parseSafeDate(a.deadline);
             const dateB = parseSafeDate(b.deadline);
-            const timeA = isNaN(dateA) ? 0 : dateA.getTime();
-            const timeB = isNaN(dateB) ? 0 : dateB.getTime();
+            const timeA = isNaN(dateA) ? Infinity : dateA.getTime();
+            const timeB = isNaN(dateB) ? Infinity : dateB.getTime();
             return timeA - timeB;
           });
 
           setDeadlines(combinedData);
-          setStatus(`Synced ${feelsDeadlines.length} tasks (${parsed.coursesCount || 0} courses)`);
+          const feelsCount = syncedDeadlines.filter(t => t.source === 'feels').length;
+          const perusallCount = syncedDeadlines.filter(t => t.source === 'perusall').length;
+          let syncStatusText = `Synced ${syncedDeadlines.length} tasks`;
+          if (feelsCount > 0 && perusallCount > 0) {
+            syncStatusText += ` (${feelsCount} FEeLS, ${perusallCount} Perusall)`;
+          } else if (parsed.coursesCount) {
+            syncStatusText += ` (${parsed.coursesCount} courses)`;
+          }
+          setStatus(syncStatusText);
           combinedData.forEach(item => scheduleDeadlineReminder(item.subject, item.description, item.deadline));
         } else {
           setDeadlines(customDeadlines);
           setStatus(customDeadlines.length > 0 ? 'Deadlines Synced' : 'No upcoming deadlines.');
+        }
+
+        // Check if any fetched course page contains a Perusall LTI URL and if getPerusallCookies() is empty
+        // Check if any fetched course page contains a Perusall LTI URL
+        // Check if any fetched course page contains a Perusall LTI URL
+        const discoveredPerusallLtiUrl = (eventData.coursePages || [])
+          .map((cp) => extractPerusallLtiUrl(typeof cp === 'string' ? cp : cp.html))
+          .find(Boolean);
+
+        const perusallCookieString = await getPerusallCookies();
+        // ✨ ADD THIS: Check if the fetcher marked the auth as expired
+        const isAuthExpired = await AsyncStorage.getItem('@perusall_auth_expired');
+
+        console.log('[Dashboard Check] Discovered LTI URL:', discoveredPerusallLtiUrl);
+        console.log('[Dashboard Check] Has Perusall Cookie:', !!perusallCookieString);
+        console.log('[Dashboard Check] Is Auth Expired:', isAuthExpired);
+
+        // ✨ MODIFY THIS: Launch the bridge if cookies are missing OR if the flag is set
+        if (discoveredPerusallLtiUrl && (!perusallCookieString || isAuthExpired === 'true')) {
+          console.log(`[Dashboard] Launching PerusallLtiBridge with URL: ${discoveredPerusallLtiUrl}`);
+
+          // Clear the flag so it doesn't loop forever
+          await AsyncStorage.removeItem('@perusall_auth_expired');
+
+          setPerusallLtiUrl(discoveredPerusallLtiUrl);
+          setNeedsPerusallAuth(true);
         }
 
         return;
@@ -692,40 +796,51 @@ const DashboardScreen = ({ onLogout, navigation }) => {
         const customDeadlines = normalizeCustomDeadlines(savedCustomStr ? JSON.parse(savedCustomStr) : []);
         const hiddenList = savedHiddenStr ? JSON.parse(savedHiddenStr) : [];
 
-        const rawArray = parsed.data || [];
+        // Concurrently parse FEeLS raw scraped strings and fetch Perusall assignments via Promise.all
+        const [feelsStructuredData, perusallAssignments] = await Promise.all([
+          Promise.resolve().then(() => {
+            const rawArray = parsed.data || [];
+            if (rawArray.length === 0) return [];
+            return rawArray.map(item => parseDeadlineString(item));
+          }),
+          fetchPerusallAssignments().catch((err) => {
+            console.warn('[Dashboard] Error fetching Perusall assignments:', err?.message || err);
+            return [];
+          }),
+        ]);
+
+        const combinedRaw = [...feelsStructuredData, ...perusallAssignments];
         let structuredData = [];
 
-        // 2. Process FEeLS data
-        if (rawArray.length > 0) {
-          structuredData = rawArray
-            .map(item => parseDeadlineString(item))
-            .filter(item => {
-              const targetDate = parseSafeDate(item.deadline);
-              if (isNaN(targetDate)) return true;
-              const msPastDeadline = Date.now() - targetDate.getTime();
-              const oneDayMs = 24 * 60 * 60 * 1000;
-              return msPastDeadline < oneDayMs;
-            });
+        // 2. Process FEeLS & Perusall data
+        if (combinedRaw.length > 0) {
+          structuredData = combinedRaw.filter(item => {
+            const targetDate = parseSafeDate(item.deadline);
+            if (isNaN(targetDate)) return true;
+            const msPastDeadline = Date.now() - targetDate.getTime();
+            const oneDayMs = 24 * 60 * 60 * 1000;
+            return msPastDeadline < oneDayMs;
+          });
         }
 
         // 3. ✨ FILTER OUT BLACKLISTED TASKS ✨
-        const feelsDeadlines = normalizeFeelsDeadlines(structuredData).filter(item => {
+        const syncedDeadlines = normalizeFeelsDeadlines(structuredData).filter(item => {
           const signature = `${item.subject}-${item.description}`;
           return !hiddenList.includes(signature); // Toss it out if you already edited it!
         });
 
-        await AsyncStorage.setItem(STORAGE_CACHED_FEELS, JSON.stringify(feelsDeadlines));
+        await AsyncStorage.setItem(STORAGE_CACHED_FEELS, JSON.stringify(syncedDeadlines));
 
         // 4. COMBINE SCRAPED DATA WITH CUSTOM DATA
-        const combinedData = [...feelsDeadlines, ...customDeadlines];
+        const combinedData = [...syncedDeadlines, ...customDeadlines];
 
         // 5. Sort and display
         if (combinedData.length > 0) {
           combinedData.sort((a, b) => {
             const dateA = parseSafeDate(a.deadline);
             const dateB = parseSafeDate(b.deadline);
-            const timeA = isNaN(dateA) ? 0 : dateA.getTime();
-            const timeB = isNaN(dateB) ? 0 : dateB.getTime();
+            const timeA = isNaN(dateA) ? Infinity : dateA.getTime();
+            const timeB = isNaN(dateB) ? Infinity : dateB.getTime();
             return timeA - timeB;
           });
 
@@ -1437,6 +1552,14 @@ const DashboardScreen = ({ onLogout, navigation }) => {
             domStorageEnabled={true}
           />
         </View>
+
+        {/* Headless Perusall LTI Bridge */}
+        {needsPerusallAuth && perusallLtiUrl ? (
+          <PerusallLtiBridge
+            url={perusallLtiUrl}
+            onAuthSuccess={handlePerusallAuthSuccess}
+          />
+        ) : null}
       </View>
     </SafeAreaView>
   );
