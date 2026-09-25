@@ -1,265 +1,266 @@
-import {
-  formatCookieHeader,
-  getPerusallBaseUrl,
-  getPerusallCookies,
-  formatPerusallDeadline,
-  fetchPerusallCourses,
-  fetchPerusallAssignmentsForCourse,
-  parsePerusallAssignment,
-  fetchPerusallAssignments,
-  PERUSALL_BASE_URL,
-} from '../src/utils/perusallFetcher';
-import CookieManager from '@react-native-cookies/cookies';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-
-jest.mock('@react-native-cookies/cookies', () => ({
-  get: jest.fn(),
-}));
+import {
+  STORAGE_SAVED_COURSES,
+  STORAGE_PERUSALL_CALENDAR_URL,
+  cleanPerusallCalendarUrl,
+  savePerusallCalendarUrl,
+  getPerusallCalendarUrl,
+  getCourses,
+  addCourse,
+  deleteCourse,
+  fetchPerusallDeadlines,
+  fetchAllCoursesDeadlines,
+} from '../src/utils/perusallFetcher';
 
 jest.mock('@react-native-async-storage/async-storage', () =>
   require('@react-native-async-storage/async-storage/jest/async-storage-mock')
 );
 
 describe('perusallFetcher', () => {
-  beforeEach(async () => {
+  beforeEach(() => {
     jest.clearAllMocks();
-    await AsyncStorage.clear();
+    AsyncStorage.clear();
   });
 
-  describe('getPerusallBaseUrl', () => {
-    test('returns PERUSALL_BASE_URL default when not saved in AsyncStorage', async () => {
-      const baseUrl = await getPerusallBaseUrl();
-      expect(baseUrl).toBe(PERUSALL_BASE_URL);
+  describe('cleanPerusallCalendarUrl', () => {
+    it('should replace webcal:// protocol with https://', () => {
+      const rawUrl = 'webcal://app.perusall.com/api/v1/calendar/feed.ics';
+      const cleaned = cleanPerusallCalendarUrl(rawUrl);
+      expect(cleaned).toBe('https://app.perusall.com/api/v1/calendar/feed.ics');
     });
 
-    test('returns saved dynamic base URL when present in AsyncStorage', async () => {
-      await AsyncStorage.setItem('@perusall_base_url', 'https://custom.perusall.com');
-      const baseUrl = await getPerusallBaseUrl();
-      expect(baseUrl).toBe('https://custom.perusall.com');
-    });
-  });
-
-  describe('formatCookieHeader', () => {
-    test('formats object with value properties properly', () => {
-      const cookies = {
-        session_id: { value: 'abc123xyz' },
-        remember_token: { value: 'tok_456' },
-      };
-      expect(formatCookieHeader(cookies)).toBe('session_id=abc123xyz; remember_token=tok_456');
+    it('should replace uppercase WEBCAL:// protocol with https://', () => {
+      const rawUrl = 'WEBCAL://app.perusall.com/api/v1/calendar/feed.ics';
+      const cleaned = cleanPerusallCalendarUrl(rawUrl);
+      expect(cleaned).toBe('https://app.perusall.com/api/v1/calendar/feed.ics');
     });
 
-    test('formats object with direct string values', () => {
-      const cookies = {
-        session_id: 'abc123xyz',
-        auth: 'tok789',
-      };
-      expect(formatCookieHeader(cookies)).toBe('session_id=abc123xyz; auth=tok789');
+    it('should handle webcal: without double slash', () => {
+      const rawUrl = 'webcal:app.perusall.com/api/v1/calendar/feed.ics';
+      const cleaned = cleanPerusallCalendarUrl(rawUrl);
+      expect(cleaned).toBe('https:app.perusall.com/api/v1/calendar/feed.ics');
     });
 
-    test('returns plain string as is', () => {
-      expect(formatCookieHeader('custom_cookie=value')).toBe('custom_cookie=value');
+    it('should preserve https:// protocol and trim spaces', () => {
+      const rawUrl = '  https://app.perusall.com/api/v1/calendar/feed.ics  ';
+      const cleaned = cleanPerusallCalendarUrl(rawUrl);
+      expect(cleaned).toBe('https://app.perusall.com/api/v1/calendar/feed.ics');
     });
 
-    test('handles empty or null values', () => {
-      expect(formatCookieHeader(null)).toBe('');
-      expect(formatCookieHeader({})).toBe('');
+    it('should return empty string for invalid inputs', () => {
+      expect(cleanPerusallCalendarUrl('')).toBe('');
+      expect(cleanPerusallCalendarUrl(null)).toBe('');
+      expect(cleanPerusallCalendarUrl(undefined)).toBe('');
     });
   });
 
-  describe('getPerusallCookies', () => {
-    test('fetches cookies from CookieManager and returns formatted header', async () => {
-      CookieManager.get.mockResolvedValue({
-        perusall_session: { value: 'secret_session' },
-      });
-
-      const header = await getPerusallCookies('https://app.perusall.com');
-      expect(CookieManager.get).toHaveBeenCalledWith('https://app.perusall.com');
-      expect(header).toBe('perusall_session=secret_session');
-    });
-
-    test('retrieves cached cookies from AsyncStorage if available', async () => {
-      await AsyncStorage.setItem('@perusall_cookies', 'cached_session_tok=999');
-      const header = await getPerusallCookies();
-      expect(header).toBe('cached_session_tok=999');
-    });
-
-    test('handles CookieManager errors gracefully', async () => {
-      CookieManager.get.mockRejectedValue(new Error('CookieManager failed'));
-      const header = await getPerusallCookies();
-      expect(header).toBe('');
-    });
-  });
-
-  describe('formatPerusallDeadline', () => {
-    test('formats valid ISO date string correctly', () => {
-      const dateStr = '2026-10-15T23:59:00Z';
-      const result = formatPerusallDeadline(dateStr);
-      expect(result.formattedDeadline).toBeDefined();
-      expect(result.targetDate).not.toBeNull();
-      expect(typeof result.remaining).toBe('string');
-    });
-
-    test('handles null or empty date string gracefully', () => {
-      const result = formatPerusallDeadline(null);
-      expect(result.formattedDeadline).toBe('Unknown Date');
-      expect(result.remaining).toBe('Unknown');
-      expect(result.targetDate).toBeNull();
-    });
-  });
-
-  describe('fetchPerusallCourses', () => {
-    test('fetches and normalizes courses list', async () => {
-      const mockCourses = [
-        { id: 'c1', name: 'CO544 Machine Learning', courseCode: 'CO544' },
-        { _id: 'c2', name: 'CO322 Data Structures' },
-      ];
-
-      global.fetch = jest.fn().mockResolvedValue({
-        ok: true,
-        status: 200,
-        json: () => Promise.resolve(mockCourses),
-      });
-
-      const courses = await fetchPerusallCourses('session=123; perusall_csrf=token_xyz%3D%3D');
-      expect(courses).toHaveLength(2);
-      expect(courses[0]).toEqual({
-        id: 'c1',
-        name: 'CO544 Machine Learning',
-        code: 'CO544',
-      });
-      expect(courses[1]).toEqual({
-        id: 'c2',
-        name: 'CO322 Data Structures',
-        code: 'CO322',
-      });
-
-      expect(global.fetch).toHaveBeenCalledWith(
-        'https://app.perusall.com/api/v1/courses',
-        expect.objectContaining({
-          headers: expect.objectContaining({
-            Origin: 'https://app.perusall.com',
-            Referer: 'https://app.perusall.com/',
-            Accept: 'application/json, text/plain, */*',
-            DNT: '1',
-            Cookie: 'session=123; perusall_csrf=token_xyz%3D%3D',
-            'x-csrf-token': 'token_xyz==',
-          }),
-        })
-      );
-    });
-
-    test('handles unauthorized (401/403) gracefully', async () => {
-      global.fetch = jest.fn().mockResolvedValue({
-        ok: false,
-        status: 401,
-        statusText: 'Unauthorized',
-      });
-
-      const courses = await fetchPerusallCourses('session=invalid');
+  describe('Multiple Course CRUD Operations (SAVED_COURSES)', () => {
+    it('getCourses should return empty array when no courses are saved', async () => {
+      const courses = await getCourses();
       expect(courses).toEqual([]);
+      expect(AsyncStorage.getItem).toHaveBeenCalledWith(STORAGE_SAVED_COURSES);
+    });
+
+    it('addCourse should sanitize webcal:// to https:// and persist course', async () => {
+      const course = await addCourse({
+        name: 'Quantum Physics',
+        calendarUrl: 'webcal://app.perusall.com/courses/qp/feed.ics',
+      });
+
+      expect(course).toEqual({
+        id: expect.any(String),
+        name: 'Quantum Physics',
+        calendarUrl: 'https://app.perusall.com/courses/qp/feed.ics',
+      });
+
+      expect(AsyncStorage.setItem).toHaveBeenCalledWith(
+        STORAGE_SAVED_COURSES,
+        JSON.stringify([course])
+      );
+
+      const savedCourses = await getCourses();
+      expect(savedCourses).toHaveLength(1);
+      expect(savedCourses[0].name).toBe('Quantum Physics');
+      expect(savedCourses[0].calendarUrl).toBe('https://app.perusall.com/courses/qp/feed.ics');
+    });
+
+    it('addCourse should update existing course if matching id is provided', async () => {
+      const course1 = await addCourse({
+        id: 'course-1',
+        name: 'Machine Learning',
+        calendarUrl: 'webcal://app.perusall.com/ml/feed.ics',
+      });
+
+      expect(course1.id).toBe('course-1');
+
+      // Update name and URL
+      const updatedCourse = await addCourse({
+        id: 'course-1',
+        name: 'Advanced Machine Learning',
+        calendarUrl: 'https://app.perusall.com/adv-ml/feed.ics',
+      });
+
+      expect(updatedCourse.name).toBe('Advanced Machine Learning');
+      expect(updatedCourse.calendarUrl).toBe('https://app.perusall.com/adv-ml/feed.ics');
+
+      const all = await getCourses();
+      expect(all).toHaveLength(1);
+      expect(all[0].name).toBe('Advanced Machine Learning');
+    });
+
+    it('deleteCourse should remove course by id and return remaining courses', async () => {
+      await addCourse({
+        id: 'c-1',
+        name: 'Course 1',
+        calendarUrl: 'https://perusall.com/1.ics',
+      });
+      await addCourse({
+        id: 'c-2',
+        name: 'Course 2',
+        calendarUrl: 'https://perusall.com/2.ics',
+      });
+
+      const remaining = await deleteCourse('c-1');
+      expect(remaining).toHaveLength(1);
+      expect(remaining[0].id).toBe('c-2');
+
+      const inStorage = await getCourses();
+      expect(inStorage).toHaveLength(1);
+      expect(inStorage[0].id).toBe('c-2');
     });
   });
 
-  describe('fetchPerusallAssignmentsForCourse', () => {
-    test('fetches assignment list for a course', async () => {
-      const mockAssignments = [
-        {
-          id: 'asg_1',
-          title: 'Chapter 1: Neural Networks Reading',
-          deadline: '2026-10-20T23:59:00Z',
-        },
-      ];
+  describe('savePerusallCalendarUrl and getPerusallCalendarUrl (legacy)', () => {
+    it('should clean and store the URL in AsyncStorage under PERUSALL_CALENDAR_URL', async () => {
+      const rawUrl = 'webcal://app.perusall.com/calendar/user/123/feed.ics';
+      const saved = await savePerusallCalendarUrl(rawUrl);
 
+      expect(saved).toBe('https://app.perusall.com/calendar/user/123/feed.ics');
+      expect(AsyncStorage.setItem).toHaveBeenCalledWith(
+        STORAGE_PERUSALL_CALENDAR_URL,
+        'https://app.perusall.com/calendar/user/123/feed.ics'
+      );
+
+      const retrieved = await getPerusallCalendarUrl();
+      expect(AsyncStorage.getItem).toHaveBeenCalledWith(STORAGE_PERUSALL_CALENDAR_URL);
+      expect(retrieved).toBe('https://app.perusall.com/calendar/user/123/feed.ics');
+    });
+
+    it('should remove item from storage if URL is empty', async () => {
+      await savePerusallCalendarUrl('');
+      expect(AsyncStorage.removeItem).toHaveBeenCalledWith(STORAGE_PERUSALL_CALENDAR_URL);
+    });
+  });
+
+  describe('fetchPerusallDeadlines multi-course handling and parsing', () => {
+    const sampleICS1 = `BEGIN:VCALENDAR
+VERSION:2.0
+PRODID:-//Perusall//EN
+X-WR-CALNAME:Physics 101
+BEGIN:VEVENT
+UID:assign-later
+SUMMARY:Chapter 5 Reading
+DESCRIPTION:Annotate pages 80-120
+DTEND:20261115T235900Z
+END:VEVENT
+END:VCALENDAR`;
+
+    const sampleICS2 = `BEGIN:VCALENDAR
+VERSION:2.0
+PRODID:-//Perusall//EN
+X-WR-CALNAME:Chemistry 201
+BEGIN:VEVENT
+UID:assign-earlier
+SUMMARY:Lab Prep Chapter 2
+DESCRIPTION:Read safety instructions
+DTEND:20261105T180000Z
+END:VEVENT
+END:VCALENDAR`;
+
+    it('should accept a single course object and attach courseId and courseName', async () => {
       global.fetch = jest.fn().mockResolvedValue({
         ok: true,
-        status: 200,
-        json: () => Promise.resolve(mockAssignments),
+        text: async () => sampleICS1,
       });
 
-      const assignments = await fetchPerusallAssignmentsForCourse('c1', 'session=123');
-      expect(assignments).toHaveLength(1);
-      expect(assignments[0].title).toBe('Chapter 1: Neural Networks Reading');
-    });
-  });
-
-  describe('parsePerusallAssignment', () => {
-    test('transforms Perusall assignment to application task schema', () => {
-      const raw = {
-        id: 'a99',
-        title: 'Deep Learning Review',
-        deadline: '2026-11-01T18:30:00Z',
-        isLocked: false,
-      };
-      const course = { id: 'c1', code: 'CO544', name: 'CO544 Machine Learning' };
-
-      const task = parsePerusallAssignment(raw, course);
-      expect(task).toEqual(
-        expect.objectContaining({
-          id: 'perusall-a99',
-          subject: 'CO544',
-          description: 'Deep Learning Review',
-          source: 'perusall',
-          isLocked: false,
-        })
-      );
-      expect(task.deadline).toBeDefined();
-    });
-  });
-
-  describe('fetchPerusallAssignments (Full Flow)', () => {
-    test('fetches courses and assignments concurrently via Promise.all and flattens results', async () => {
-      const mockCourses = [
-        { id: 'c1', name: 'CO544 Machine Learning', courseCode: 'CO544' },
-        { id: 'c2', name: 'CO322 Data Structures', courseCode: 'CO322' },
-      ];
-
-      const mockAsg1 = [
-        { id: 'a1', title: 'ML Reading 1', deadline: '2026-10-10T23:59:00Z' },
-      ];
-      const mockAsg2 = [
-        { id: 'a2', title: 'DS Trees Reading', deadline: '2026-10-12T23:59:00Z' },
-      ];
-
-      global.fetch = jest.fn((url) => {
-        if (url.includes('/api/v1/courses/c1/assignments')) {
-          return Promise.resolve({
-            ok: true,
-            status: 200,
-            json: () => Promise.resolve(mockAsg1),
-          });
-        }
-        if (url.includes('/api/v1/courses/c2/assignments')) {
-          return Promise.resolve({
-            ok: true,
-            status: 200,
-            json: () => Promise.resolve(mockAsg2),
-          });
-        }
-        if (url.includes('/api/v1/courses')) {
-          return Promise.resolve({
-            ok: true,
-            status: 200,
-            json: () => Promise.resolve(mockCourses),
-          });
-        }
-        return Promise.reject(new Error('Unknown endpoint'));
+      const deadlines = await fetchPerusallDeadlines({
+        id: 'phys-101',
+        name: 'Manual Physics Name',
+        calendarUrl: 'https://app.perusall.com/phys.ics',
       });
 
-      const results = await fetchPerusallAssignments({
-        cookies: 'session_token=valid123',
+      expect(deadlines).toHaveLength(1);
+      expect(deadlines[0]).toEqual({
+        id: 'assign-later',
+        courseId: 'phys-101',
+        courseName: 'Manual Physics Name',
+        title: 'Chapter 5 Reading',
+        description: 'Annotate pages 80-120',
+        deadline: new Date('2026-11-15T23:59:00.000Z'),
       });
-
-      expect(results).toHaveLength(2);
-      expect(results[0].subject).toBe('CO544');
-      expect(results[0].description).toBe('ML Reading 1');
-      expect(results[1].subject).toBe('CO322');
-      expect(results[1].description).toBe('DS Trees Reading');
     });
 
-    test('returns empty array if no cookies are available', async () => {
-      CookieManager.get.mockResolvedValue({});
-      const results = await fetchPerusallAssignments();
-      expect(results).toEqual([]);
+    it('should fall back to x-wr-calname if no manual course name is provided', async () => {
+      global.fetch = jest.fn().mockResolvedValue({
+        ok: true,
+        text: async () => sampleICS1,
+      });
+
+      const deadlines = await fetchPerusallDeadlines({
+        id: 'phys-101',
+        calendarUrl: 'https://app.perusall.com/phys.ics',
+      });
+
+      expect(deadlines).toHaveLength(1);
+      expect(deadlines[0].courseName).toBe('Physics 101');
+    });
+
+    it('should accept an array of course objects, aggregate results, and sort chronologically ascending', async () => {
+      global.fetch = jest.fn().mockImplementation(async (url) => {
+        if (url.includes('phys')) {
+          return { ok: true, text: async () => sampleICS1 };
+        }
+        return { ok: true, text: async () => sampleICS2 };
+      });
+
+      const courses = [
+        { id: 'course-1', name: 'Physics', calendarUrl: 'https://app.perusall.com/phys.ics' }, // Due Nov 15
+        { id: 'course-2', name: 'Chemistry', calendarUrl: 'https://app.perusall.com/chem.ics' }, // Due Nov 5
+      ];
+
+      const deadlines = await fetchPerusallDeadlines(courses);
+
+      expect(deadlines).toHaveLength(2);
+      // Earliest (Nov 5) should be first
+      expect(deadlines[0].id).toBe('assign-earlier');
+      expect(deadlines[0].courseName).toBe('Chemistry');
+      expect(deadlines[0].deadline).toEqual(new Date('2026-11-05T18:00:00.000Z'));
+
+      // Later (Nov 15) should be second
+      expect(deadlines[1].id).toBe('assign-later');
+      expect(deadlines[1].courseName).toBe('Physics');
+      expect(deadlines[1].deadline).toEqual(new Date('2026-11-15T23:59:00.000Z'));
+    });
+
+    it('fetchAllCoursesDeadlines should fetch deadlines across courses and tag courseName', async () => {
+      global.fetch = jest.fn().mockResolvedValue({
+        ok: true,
+        text: async () => sampleICS1,
+      });
+
+      const courses = [
+        { id: '1', name: 'CO544 ML', calendarUrl: 'https://perusall.com/feed1.ics' },
+      ];
+
+      const allDeadlines = await fetchAllCoursesDeadlines(courses);
+      expect(allDeadlines).toHaveLength(1);
+      expect(allDeadlines[0].courseName).toBe('CO544 ML');
+    });
+
+    it('should safely return empty array on network error', async () => {
+      global.fetch = jest.fn().mockRejectedValue(new Error('Network error'));
+      const deadlines = await fetchPerusallDeadlines('https://app.perusall.com/feed.ics');
+      expect(deadlines).toEqual([]);
     });
   });
 });

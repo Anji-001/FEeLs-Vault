@@ -6,10 +6,18 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import CookieManager from '@react-native-cookies/cookies';
 import DateTimePicker from '@react-native-community/datetimepicker';
 import notifee, { AuthorizationStatus, TimestampTrigger, TriggerType } from '@notifee/react-native';
-import { parseDeadlineString, parseCoursePageHtml, parseAllCoursePages, extractPerusallLtiUrl } from '../utils/parser';
+import { parseDeadlineString, parseCoursePageHtml, parseAllCoursePages } from '../utils/parser';
 import { getCourseScraperScript, fetchCoursePages } from '../utils/courseFetcher';
-import { fetchPerusallAssignments, getPerusallCookies } from '../utils/perusallFetcher';
-import PerusallLtiBridge from '../components/PerusallLtiBridge';
+import {
+  STORAGE_SAVED_COURSES,
+  STORAGE_PERUSALL_CALENDAR_URL,
+  getCourses,
+  addCourse,
+  deleteCourse,
+  cleanPerusallCalendarUrl,
+  savePerusallCalendarUrl,
+  fetchPerusallDeadlines,
+} from '../utils/perusallFetcher';
 import { Swipeable } from 'react-native-gesture-handler';
 import Reanimated, { FadeInDown, FadeOut, LinearTransition, ZoomIn } from 'react-native-reanimated';
 import BootSplash from "react-native-bootsplash";
@@ -37,7 +45,53 @@ const DEFAULT_HEADER = "*UPCOMING DEADLINES:*";
 const DEFAULT_ITEM = "*[{subject}]* _{desc}_\n*Due:* {date}\n*Left:* {left}";
 const STORAGE_CUSTOM_DEADLINES = '@custom_deadlines';
 const STORAGE_CACHED_FEELS = '@cached_feels_deadlines';
-const DEADLINE_FILTERS = ['Assignments', 'Quizzes', 'Labs', 'Other'];
+const DEADLINE_FILTERS = ['Assignments', 'Quizzes', 'Labs', 'Perusall', 'Other'];
+
+const formatPerusallDate = (d) => {
+  if (!d) return 'Unknown Date';
+  const dateObj = d instanceof Date ? d : new Date(d);
+  if (isNaN(dateObj)) return String(d);
+  const day = String(dateObj.getDate()).padStart(2, '0');
+  const month = String(dateObj.getMonth() + 1).padStart(2, '0');
+  const year = dateObj.getFullYear();
+  let hours = dateObj.getHours();
+  const minutes = String(dateObj.getMinutes()).padStart(2, '0');
+  const ampm = hours >= 12 ? 'PM' : 'AM';
+  hours = hours % 12 || 12;
+  return `${day}/${month}/${year} ${hours}:${minutes} ${ampm}`;
+};
+
+const normalizePerusallDeadlines = (items) => {
+  if (!Array.isArray(items)) return [];
+  return items.map((item, idx) => {
+    const targetDate = item.deadline instanceof Date ? item.deadline : (item.deadline ? new Date(item.deadline) : null);
+    let updatedRemaining = 'Unknown';
+    if (targetDate && !isNaN(targetDate)) {
+      const diffMs = targetDate.getTime() - Date.now();
+      if (diffMs < 0) {
+        updatedRemaining = 'Overdue 🚨';
+      } else {
+        const daysLeft = Math.floor(diffMs / (1000 * 60 * 60 * 24));
+        const hoursLeft = Math.floor((diffMs % (1000 * 60 * 60 * 24)) / (1000 * 60 * 60));
+        updatedRemaining = `${daysLeft} days ${hoursLeft} hours`;
+      }
+    }
+
+    const courseDisplayName = item.courseName || item.subject || 'Course Module';
+
+    return {
+      id: item.id || `perusall-${idx}`,
+      subject: courseDisplayName,
+      courseName: item.courseName || null,
+      courseId: item.courseId || null,
+      task: item.title,
+      description: item.title,
+      deadline: targetDate ? formatPerusallDate(targetDate) : 'Unknown Date',
+      remaining: updatedRemaining,
+      source: 'perusall',
+    };
+  });
+};
 
 const parseSafeDate = (dateString) => {
   let targetDate = new Date(dateString);
@@ -109,20 +163,13 @@ const normalizeFeelsDeadlines = (items) => {
 };
 
 /**
- * Concurrently fetches and parses deadlines from both course pages/courseFetcher and Perusall API,
- * merges the results, and sorts them chronologically.
+ * Fetches and parses deadlines from course pages,
+ * and sorts them chronologically.
  */
-export const syncAllDeadlines = async (coursePages = [], perusallOptions = {}) => {
-  const [courseStructuredTasks, perusallAssignments] = await Promise.all([
-    Promise.resolve().then(() => parseAllCoursePages(coursePages)),
-    fetchPerusallAssignments(perusallOptions).catch((err) => {
-      console.warn('[Dashboard] Error fetching Perusall assignments:', err?.message || err);
-      return [];
-    }),
-  ]);
+export const syncAllDeadlines = async (coursePages = []) => {
+  const courseStructuredTasks = parseAllCoursePages(coursePages);
 
-  const merged = [...courseStructuredTasks, ...perusallAssignments];
-  return merged.sort((a, b) => {
+  return courseStructuredTasks.sort((a, b) => {
     const dateA = parseSafeDate(a.deadline);
     const dateB = parseSafeDate(b.deadline);
     const timeA = isNaN(dateA) ? Infinity : dateA.getTime();
@@ -142,6 +189,7 @@ const getUrgencyStyle = (deadlineStr) => {
 };
 
 const getDeadlineCategory = (item) => {
+  if (item?.source === 'perusall' || (item?.subject || '').toLowerCase().includes('perusall')) return 'Perusall';
   const text = `${item?.description || ''} ${item?.subject || ''}`.toLowerCase();
   if (text.includes('quiz')) return 'Quizzes';
   if (text.includes('lab')) return 'Labs';
@@ -157,6 +205,13 @@ const DashboardScreen = ({ onLogout, navigation }) => {
 
   // States
   const [deadlines, setDeadlines] = useState([]);
+  const [perusallDeadlines, setPerusallDeadlines] = useState([]);
+  const [isPerusallLoading, setIsPerusallLoading] = useState(false);
+  const [savedCourses, setSavedCourses] = useState([]);
+  const [showCourseModal, setShowCourseModal] = useState(false);
+  const [newModuleCode, setNewModuleCode] = useState('');
+  const [newCalendarUrl, setNewCalendarUrl] = useState('');
+  const [courseError, setCourseError] = useState('');
   const [notes, setNotes] = useState([]); // ✨ NEW: Notes Array
   const [loginError, setLoginError] = useState(null);
   const [successMessage, setSuccessMessage] = useState(null);
@@ -164,6 +219,7 @@ const DashboardScreen = ({ onLogout, navigation }) => {
   const [refreshing, setRefreshing] = useState(false);
   const [reminderOffset, setReminderOffset] = useState('24');
   const [showSettings, setShowSettings] = useState(false);
+  const [perusallCalendarUrl, setPerusallCalendarUrl] = useState('');
   const [headerTemplate, setHeaderTemplate] = useState(DEFAULT_HEADER);
   const [itemTemplate, setItemTemplate] = useState(DEFAULT_ITEM);
   const [lastDeleted, setLastDeleted] = useState(null);
@@ -171,9 +227,6 @@ const DashboardScreen = ({ onLogout, navigation }) => {
 
   const [dividerTemplate, setDividerTemplate] = useState('\n\n〰️〰️〰️〰️〰️〰️〰️〰️〰️\n\n');
 
-  // Perusall LTI Bridge Auth States
-  const [needsPerusallAuth, setNeedsPerusallAuth] = useState(false);
-  const [perusallLtiUrl, setPerusallLtiUrl] = useState(null);
 
   // Task Modal States
   const [showAddModal, setShowAddModal] = useState(false);
@@ -220,19 +273,50 @@ const DashboardScreen = ({ onLogout, navigation }) => {
 
       // Load saved templates and notes
       try {
-        const [savedHeader, savedItem, savedOffset, savedDivider, savedNotes, savedSemesterStr] = await Promise.all([
+        const [savedHeader, savedItem, savedOffset, savedDivider, savedNotes, savedSemesterStr, savedPerusallUrl] = await Promise.all([
           AsyncStorage.getItem('@header_template'),
           AsyncStorage.getItem('@item_template'),
           AsyncStorage.getItem('@reminder_offset'),
           AsyncStorage.getItem('@divider_template'),
           AsyncStorage.getItem('@saved_notes'),
           AsyncStorage.getItem('@selected_semester'),
+          AsyncStorage.getItem(STORAGE_PERUSALL_CALENDAR_URL),
         ]);
 
         if (savedHeader) setHeaderTemplate(savedHeader);
         if (savedItem) setItemTemplate(savedItem);
         if (savedOffset) setReminderOffset(savedOffset);
         if (savedDivider) setDividerTemplate(savedDivider);
+        if (savedPerusallUrl) setPerusallCalendarUrl(savedPerusallUrl);
+
+        // Load saved multi-courses
+        const storedCourses = await getCourses();
+        setSavedCourses(storedCourses);
+
+        const coursesToFetch = storedCourses.length > 0 ? storedCourses : (savedPerusallUrl ? savedPerusallUrl : null);
+
+        if (coursesToFetch) {
+          setIsPerusallLoading(true);
+          fetchPerusallDeadlines(coursesToFetch)
+            .then((pItems) => {
+              setPerusallDeadlines(pItems || []);
+              setIsPerusallLoading(false);
+              const normP = normalizePerusallDeadlines(pItems || []);
+              setDeadlines((prev) => {
+                const nonP = prev.filter((d) => d.source !== 'perusall');
+                const combined = [...nonP, ...normP];
+                combined.sort((a, b) => parseSafeDate(a.deadline) - parseSafeDate(b.deadline));
+                return combined;
+              });
+            })
+            .catch((err) => {
+              console.error('Failed to load course deadlines on mount:', err);
+              setIsPerusallLoading(false);
+            });
+        } else {
+          setPerusallDeadlines([]);
+        }
+
         if (savedNotes) {
           const parsedNotes = JSON.parse(savedNotes);
           if (Array.isArray(parsedNotes)) setNotes(parsedNotes);
@@ -283,13 +367,96 @@ const DashboardScreen = ({ onLogout, navigation }) => {
 
     };
     loadData();
-  }, []);
+  }, [onLogout]);
+
+  const reloadCourseDeadlines = async (coursesList) => {
+    try {
+      const courses = Array.isArray(coursesList) ? coursesList : await getCourses();
+      setSavedCourses(courses);
+      if (courses.length > 0) {
+        setIsPerusallLoading(true);
+        const pDeadlines = await fetchPerusallDeadlines(courses);
+        setPerusallDeadlines(pDeadlines || []);
+        const normP = normalizePerusallDeadlines(pDeadlines || []);
+        setDeadlines((prev) => {
+          const nonP = prev.filter((d) => d.source !== 'perusall');
+          const combined = [...nonP, ...normP];
+          combined.sort((a, b) => parseSafeDate(a.deadline) - parseSafeDate(b.deadline));
+          return combined;
+        });
+      } else {
+        setPerusallDeadlines([]);
+        setDeadlines((prev) => prev.filter((d) => d.source !== 'perusall'));
+      }
+    } catch (err) {
+      console.error('Failed to reload course deadlines:', err);
+    } finally {
+      setIsPerusallLoading(false);
+    }
+  };
+
+  const handleAddCourse = async () => {
+    const code = newModuleCode.trim();
+    const url = newCalendarUrl.trim();
+
+    if (!code || !url) {
+      setCourseError('Please enter both module code and calendar feed URL.');
+      return;
+    }
+
+    try {
+      setCourseError('');
+      const added = await addCourse({ name: code, calendarUrl: url });
+      setNewModuleCode('');
+      setNewCalendarUrl('');
+      const updated = await getCourses();
+      setSavedCourses(updated);
+      await reloadCourseDeadlines(updated);
+      setSuccessMessage(`Course module "${added.name}" added successfully!`);
+    } catch (err) {
+      console.error('Error adding course:', err);
+      setCourseError('Failed to save course module.');
+    }
+  };
+
+  const handleDeleteCourse = async (id) => {
+    try {
+      const updated = await deleteCourse(id);
+      setSavedCourses(updated);
+      await reloadCourseDeadlines(updated);
+    } catch (err) {
+      console.error('Error deleting course:', err);
+    }
+  };
 
   const saveTemplates = async () => {
     await AsyncStorage.setItem('@header_template', headerTemplate);
     await AsyncStorage.setItem('@item_template', itemTemplate);
     await AsyncStorage.setItem('@reminder_offset', reminderOffset);
     await AsyncStorage.setItem('@divider_template', dividerTemplate);
+
+    const cleanedPerusall = await savePerusallCalendarUrl(perusallCalendarUrl);
+    setPerusallCalendarUrl(cleanedPerusall);
+
+    if (cleanedPerusall) {
+      setIsPerusallLoading(true);
+      fetchPerusallDeadlines(cleanedPerusall)
+        .then((pItems) => {
+          setPerusallDeadlines(pItems || []);
+          setIsPerusallLoading(false);
+          const normP = normalizePerusallDeadlines(pItems || []);
+          setDeadlines((prev) => {
+            const nonP = prev.filter((d) => d.source !== 'perusall');
+            const combined = [...nonP, ...normP];
+            combined.sort((a, b) => parseSafeDate(a.deadline) - parseSafeDate(b.deadline));
+            return combined;
+          });
+        })
+        .catch(() => setIsPerusallLoading(false));
+    } else {
+      setPerusallDeadlines([]);
+      setDeadlines((prev) => prev.filter((d) => d.source !== 'perusall'));
+    }
 
     setShowSettings(false); // Close the settings menu
     setSuccessMessage("Your settings have been saved successfully!"); // ✨ Trigger custom modal
@@ -573,42 +740,26 @@ const DashboardScreen = ({ onLogout, navigation }) => {
     });
   };
 
-  const handlePerusallAuthSuccess = useCallback(async () => {
-    console.log('[Dashboard] Perusall LTI Auth succeeded. Unmounting bridge and fetching Perusall assignments...');
-    setNeedsPerusallAuth(false);
-    setPerusallLtiUrl(null);
-
-    try {
-      const newPerusallTasks = await fetchPerusallAssignments();
-      if (Array.isArray(newPerusallTasks) && newPerusallTasks.length > 0) {
-        setDeadlines((prev) => {
-          const nonPerusall = prev.filter((item) => item.source !== 'perusall');
-          const merged = [...nonPerusall, ...newPerusallTasks];
-          merged.sort((a, b) => {
-            const dateA = parseSafeDate(a.deadline);
-            const dateB = parseSafeDate(b.deadline);
-            const timeA = isNaN(dateA) ? Infinity : dateA.getTime();
-            const timeB = isNaN(dateB) ? Infinity : dateB.getTime();
-            return timeA - timeB;
-          });
-          return merged;
-        });
-
-        const cachedStr = await AsyncStorage.getItem('@cached_tasks');
-        const cachedTasks = cachedStr ? JSON.parse(cachedStr) : [];
-        const updatedCached = [...cachedTasks.filter((item) => item.source !== 'perusall'), ...newPerusallTasks];
-        await AsyncStorage.setItem('@cached_tasks', JSON.stringify(updatedCached));
-        setStatus('Perusall deadlines synced');
-        newPerusallTasks.forEach(item => scheduleDeadlineReminder(item.subject, item.description, item.deadline));
-      }
-    } catch (err) {
-      console.warn('[Dashboard] Error syncing Perusall assignments after auth:', err?.message || err);
-    }
-  }, []);
 
   const onRefresh = useCallback(() => {
     setRefreshing(true);
     setStatus('Refreshing FEeLS data...');
+
+    const coursesToRefresh = savedCourses.length > 0 ? savedCourses : (perusallCalendarUrl ? perusallCalendarUrl : null);
+    if (coursesToRefresh) {
+      fetchPerusallDeadlines(coursesToRefresh)
+        .then((pItems) => {
+          setPerusallDeadlines(pItems || []);
+          const normP = normalizePerusallDeadlines(pItems || []);
+          setDeadlines((prev) => {
+            const nonP = prev.filter((d) => d.source !== 'perusall');
+            const combined = [...nonP, ...normP];
+            combined.sort((a, b) => parseSafeDate(a.deadline) - parseSafeDate(b.deadline));
+            return combined;
+          });
+        })
+        .catch((e) => console.error('Failed to refresh Perusall deadlines:', e));
+    }
 
     if (syncWatchdogTimer.current) clearTimeout(syncWatchdogTimer.current);
     syncWatchdogTimer.current = setTimeout(() => {
@@ -621,7 +772,7 @@ const DashboardScreen = ({ onLogout, navigation }) => {
     } else {
       setRefreshing(false);
     }
-  }, []);
+  }, [perusallCalendarUrl]);
 
   const handleMessage = async (event) => {
     if (syncWatchdogTimer.current) {
@@ -699,16 +850,7 @@ const DashboardScreen = ({ onLogout, navigation }) => {
         const customDeadlines = normalizeCustomDeadlines(savedCustomStr ? JSON.parse(savedCustomStr) : []);
         const hiddenList = savedHiddenStr ? JSON.parse(savedHiddenStr) : [];
 
-        // Concurrently parse FEeLS course pages and fetch Perusall assignments via Promise.all
-        const [courseStructuredTasks, perusallAssignments] = await Promise.all([
-          Promise.resolve().then(() => parseAllCoursePages(eventData.coursePages || [])),
-          fetchPerusallAssignments().catch((err) => {
-            console.warn('[Dashboard] Error fetching Perusall assignments:', err?.message || err);
-            return [];
-          }),
-        ]);
-
-        const structuredData = [...courseStructuredTasks, ...perusallAssignments];
+        const structuredData = parseAllCoursePages(eventData.coursePages || []);
 
         // Save fresh tasks array to the cache immediately
         await AsyncStorage.setItem('@cached_tasks', JSON.stringify(structuredData));
@@ -730,7 +872,8 @@ const DashboardScreen = ({ onLogout, navigation }) => {
 
         await AsyncStorage.setItem(STORAGE_CACHED_FEELS, JSON.stringify(syncedDeadlines));
 
-        const combinedData = [...syncedDeadlines, ...customDeadlines];
+        const normPerusall = normalizePerusallDeadlines(perusallDeadlines);
+        const combinedData = [...syncedDeadlines, ...customDeadlines, ...normPerusall];
         if (combinedData.length > 0) {
           combinedData.sort((a, b) => {
             const dateA = parseSafeDate(a.deadline);
@@ -741,45 +884,16 @@ const DashboardScreen = ({ onLogout, navigation }) => {
           });
 
           setDeadlines(combinedData);
-          const feelsCount = syncedDeadlines.filter(t => t.source === 'feels').length;
-          const perusallCount = syncedDeadlines.filter(t => t.source === 'perusall').length;
           let syncStatusText = `Synced ${syncedDeadlines.length} tasks`;
-          if (feelsCount > 0 && perusallCount > 0) {
-            syncStatusText += ` (${feelsCount} FEeLS, ${perusallCount} Perusall)`;
-          } else if (parsed.coursesCount) {
+          if (parsed.coursesCount) {
             syncStatusText += ` (${parsed.coursesCount} courses)`;
           }
           setStatus(syncStatusText);
           combinedData.forEach(item => scheduleDeadlineReminder(item.subject, item.description, item.deadline));
         } else {
-          setDeadlines(customDeadlines);
-          setStatus(customDeadlines.length > 0 ? 'Deadlines Synced' : 'No upcoming deadlines.');
-        }
-
-        // Check if any fetched course page contains a Perusall LTI URL and if getPerusallCookies() is empty
-        // Check if any fetched course page contains a Perusall LTI URL
-        // Check if any fetched course page contains a Perusall LTI URL
-        const discoveredPerusallLtiUrl = (eventData.coursePages || [])
-          .map((cp) => extractPerusallLtiUrl(typeof cp === 'string' ? cp : cp.html))
-          .find(Boolean);
-
-        const perusallCookieString = await getPerusallCookies();
-        // ✨ ADD THIS: Check if the fetcher marked the auth as expired
-        const isAuthExpired = await AsyncStorage.getItem('@perusall_auth_expired');
-
-        console.log('[Dashboard Check] Discovered LTI URL:', discoveredPerusallLtiUrl);
-        console.log('[Dashboard Check] Has Perusall Cookie:', !!perusallCookieString);
-        console.log('[Dashboard Check] Is Auth Expired:', isAuthExpired);
-
-        // ✨ MODIFY THIS: Launch the bridge if cookies are missing OR if the flag is set
-        if (discoveredPerusallLtiUrl && (!perusallCookieString || isAuthExpired === 'true')) {
-          console.log(`[Dashboard] Launching PerusallLtiBridge with URL: ${discoveredPerusallLtiUrl}`);
-
-          // Clear the flag so it doesn't loop forever
-          await AsyncStorage.removeItem('@perusall_auth_expired');
-
-          setPerusallLtiUrl(discoveredPerusallLtiUrl);
-          setNeedsPerusallAuth(true);
+          const fallbackData = [...customDeadlines, ...normPerusall];
+          setDeadlines(fallbackData);
+          setStatus(fallbackData.length > 0 ? 'Deadlines Synced' : 'No upcoming deadlines.');
         }
 
         return;
@@ -796,25 +910,13 @@ const DashboardScreen = ({ onLogout, navigation }) => {
         const customDeadlines = normalizeCustomDeadlines(savedCustomStr ? JSON.parse(savedCustomStr) : []);
         const hiddenList = savedHiddenStr ? JSON.parse(savedHiddenStr) : [];
 
-        // Concurrently parse FEeLS raw scraped strings and fetch Perusall assignments via Promise.all
-        const [feelsStructuredData, perusallAssignments] = await Promise.all([
-          Promise.resolve().then(() => {
-            const rawArray = parsed.data || [];
-            if (rawArray.length === 0) return [];
-            return rawArray.map(item => parseDeadlineString(item));
-          }),
-          fetchPerusallAssignments().catch((err) => {
-            console.warn('[Dashboard] Error fetching Perusall assignments:', err?.message || err);
-            return [];
-          }),
-        ]);
-
-        const combinedRaw = [...feelsStructuredData, ...perusallAssignments];
+        const rawArray = parsed.data || [];
+        const feelsStructuredData = rawArray.map(item => parseDeadlineString(item));
         let structuredData = [];
 
-        // 2. Process FEeLS & Perusall data
-        if (combinedRaw.length > 0) {
-          structuredData = combinedRaw.filter(item => {
+        // 2. Process FEeLS data
+        if (feelsStructuredData.length > 0) {
+          structuredData = feelsStructuredData.filter(item => {
             const targetDate = parseSafeDate(item.deadline);
             if (isNaN(targetDate)) return true;
             const msPastDeadline = Date.now() - targetDate.getTime();
@@ -1043,7 +1145,28 @@ const DashboardScreen = ({ onLogout, navigation }) => {
           </ScrollView>
 
           {/* DEADLINES LIST */}
-          {deadlines.length > 0 ? (
+          {isPerusallLoading && deadlineFilters.includes('Perusall') ? (
+            <View style={styles.emptyState}>
+              <ActivityIndicator size="large" color="#4f46e5" style={styles.emptyStateIcon} />
+              <Text style={styles.placeholderText}>Loading course deadlines...</Text>
+            </View>
+          ) : !isPerusallLoading && savedCourses.length === 0 && !perusallCalendarUrl && deadlineFilters.includes('Perusall') ? (
+            <View style={styles.emptyState}>
+              <ArchiveBoxIcon size={48} color="#9ca3af" style={styles.emptyStateIcon} />
+              <Text style={styles.placeholderText}>No Course Modules</Text>
+              <Text style={{ fontSize: 13, color: '#6b7280', textAlign: 'center', marginTop: 6, marginBottom: 12, paddingHorizontal: 30 }}>
+                Add your course module feeds (e.g., Perusall or iCal) to sync and track all assignments.
+              </Text>
+              <TouchableOpacity
+                style={styles.emptyStateActionBtn}
+                onPress={() => setShowCourseModal(true)}
+                activeOpacity={0.8}
+              >
+                <PlusIcon size={18} color="#fff" style={{ marginRight: 6 }} />
+                <Text style={styles.emptyStateActionBtnText}>Add your first course module</Text>
+              </TouchableOpacity>
+            </View>
+          ) : deadlines.length > 0 ? (
             deadlines.map((item, index) => (
               (deadlineFilters.length === 0 || deadlineFilters.includes(getDeadlineCategory(item))) ?
                 <Reanimated.View key={item.id} style={styles.cardWrapper} entering={FadeInDown.duration(200)} exiting={FadeOut.duration(150)} layout={LinearTransition.duration(200)}>
@@ -1064,7 +1187,14 @@ const DashboardScreen = ({ onLogout, navigation }) => {
                   >
                     <View style={[styles.card, getUrgencyStyle(item.deadline)]}>
                       <View style={styles.cardHeader}>
-                        <View style={styles.moduleBadge}><Text style={styles.moduleBadgeText}>{item.subject}</Text></View>
+                        <View style={[styles.moduleBadge, (item.source === 'perusall' || item.courseName) && styles.courseModuleBadge]}>
+                          {(item.source === 'perusall' || item.courseName) && (
+                            <AcademicCapIcon size={13} color="#4338ca" style={{ marginRight: 4 }} />
+                          )}
+                          <Text style={[styles.moduleBadgeText, (item.source === 'perusall' || item.courseName) && styles.courseModuleBadgeText]}>
+                            {item.courseName || item.subject || 'Module'}
+                          </Text>
+                        </View>
                         {item.isLocked ? (
                           <View style={styles.lockBadge}>
                             <LockClosedIcon size={12} color="#b45309" style={{ marginRight: 4 }} />
@@ -1096,6 +1226,16 @@ const DashboardScreen = ({ onLogout, navigation }) => {
             <View style={styles.emptyState}>
               <ArchiveBoxIcon size={48} color="#9ca3af" style={styles.emptyStateIcon} />
               <Text style={styles.placeholderText}>No deadlines detected.</Text>
+              {savedCourses.length === 0 && (
+                <TouchableOpacity
+                  style={[styles.emptyStateActionBtn, { marginTop: 14 }]}
+                  onPress={() => setShowCourseModal(true)}
+                  activeOpacity={0.8}
+                >
+                  <PlusIcon size={18} color="#fff" style={{ marginRight: 6 }} />
+                  <Text style={styles.emptyStateActionBtnText}>Add your first course module</Text>
+                </TouchableOpacity>
+              )}
             </View>
           )}
         </ScrollView>
@@ -1188,63 +1328,205 @@ const DashboardScreen = ({ onLogout, navigation }) => {
         {/* --- SETTINGS MODAL --- */}
         <Modal visible={showSettings} animationType="slide" transparent={true}>
           <View style={styles.modalOverlay}>
-            <View style={styles.modalContent}>
-              <Text style={styles.modalTitle}>Settings</Text>
-              <Text style={styles.inputLabel}>Remind me X hours before:</Text>
-              <TextInput style={styles.input} value={reminderOffset} onChangeText={setReminderOffset} keyboardType="number-pad" />
-              <Text style={styles.inputLabel}>Header Text (Share):</Text>
-              <TextInput style={styles.input} value={headerTemplate} onChangeText={setHeaderTemplate} />
-              <Text style={styles.inputLabel}>Item Format (Share):</Text>
-              <TextInput style={[styles.input, { height: 80, textAlignVertical: 'top' }]} multiline={true} value={itemTemplate} onChangeText={setItemTemplate} />
-              <Text style={styles.inputLabel}>Divider (Share):</Text>
-              <TextInput
-                style={[styles.input, { height: 60, textAlignVertical: 'top' }]}
-                multiline={true}
-                value={dividerTemplate}
-                onChangeText={setDividerTemplate}
-                placeholder="Leave blank for no line"
-              />
-              <View style={{ marginTop: 15, marginBottom: 15 }}>
-                <Text style={styles.inputLabel}>Active Semester:</Text>
-                <TouchableOpacity
-                  style={styles.settingsSemesterBtn}
-                  onPress={() => {
-                    setShowSettings(false);
-                    setTimeout(() => setShowSemesterModal(true), 200);
-                  }}
-                >
-                  <Text style={styles.settingsSemesterBtnText} numberOfLines={1}>
-                    {selectedSemester ? selectedSemester.title : 'Choose Semester'}
+            <View style={[styles.modalContent, { maxHeight: '90%' }]}>
+              <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={{ paddingBottom: 20 }}>
+                <Text style={styles.modalTitle}>Settings</Text>
+
+                {/* Manage Course Modules */}
+                <View style={{ marginBottom: 15 }}>
+                  <Text style={styles.inputLabel}>Course Modules & Feeds:</Text>
+                  <TouchableOpacity
+                    style={styles.manageCoursesBtn}
+                    onPress={() => {
+                      setShowSettings(false);
+                      setTimeout(() => setShowCourseModal(true), 200);
+                    }}
+                    activeOpacity={0.8}
+                  >
+                    <View style={{ flexDirection: 'row', alignItems: 'center', flex: 1 }}>
+                      <AcademicCapIcon size={20} color="#4f46e5" style={{ marginRight: 8 }} />
+                      <Text style={styles.manageCoursesBtnText}>
+                        Manage Course Modules ({savedCourses.length} active)
+                      </Text>
+                    </View>
+                    <ChevronDownIcon size={16} color="#4f46e5" />
+                  </TouchableOpacity>
+                </View>
+
+                {/* Legacy Perusall Calendar Link */}
+                <View style={{ marginBottom: 15 }}>
+                  <Text style={styles.inputLabel}>Quick Calendar Link (Legacy):</Text>
+                  <TextInput
+                    style={styles.input}
+                    value={perusallCalendarUrl}
+                    onChangeText={setPerusallCalendarUrl}
+                    placeholder="webcal://app.perusall.com/api/v1/calendar/..."
+                    placeholderTextColor="#9ca3af"
+                    autoCapitalize="none"
+                    autoCorrect={false}
+                  />
+                  <Text style={{ fontSize: 11, color: '#6b7280', marginTop: -14, marginBottom: 5 }}>
+                    webcal:// URLs are automatically converted to https:// when saved.
                   </Text>
-                  <ChevronDownIcon size={16} color="#4f46e5" />
+                </View>
+
+                <Text style={styles.inputLabel}>Remind me X hours before:</Text>
+                <TextInput style={styles.input} value={reminderOffset} onChangeText={setReminderOffset} keyboardType="number-pad" />
+                <Text style={styles.inputLabel}>Header Text (Share):</Text>
+                <TextInput style={styles.input} value={headerTemplate} onChangeText={setHeaderTemplate} />
+                <Text style={styles.inputLabel}>Item Format (Share):</Text>
+                <TextInput style={[styles.input, { height: 80, textAlignVertical: 'top' }]} multiline={true} value={itemTemplate} onChangeText={setItemTemplate} />
+                <Text style={styles.inputLabel}>Divider (Share):</Text>
+                <TextInput
+                  style={[styles.input, { height: 60, textAlignVertical: 'top' }]}
+                  multiline={true}
+                  value={dividerTemplate}
+                  onChangeText={setDividerTemplate}
+                  placeholder="Leave blank for no line"
+                />
+                <View style={{ marginTop: 15, marginBottom: 15 }}>
+                  <Text style={styles.inputLabel}>Active Semester:</Text>
+                  <TouchableOpacity
+                    style={styles.settingsSemesterBtn}
+                    onPress={() => {
+                      setShowSettings(false);
+                      setTimeout(() => setShowSemesterModal(true), 200);
+                    }}
+                  >
+                    <Text style={styles.settingsSemesterBtnText} numberOfLines={1}>
+                      {selectedSemester ? selectedSemester.title : 'Choose Semester'}
+                    </Text>
+                    <ChevronDownIcon size={16} color="#4f46e5" />
+                  </TouchableOpacity>
+                </View>
+
+                {/* ✨ NEW: Inspect Scraped HTML Button in Settings */}
+                <View style={{ marginBottom: 15 }}>
+                  <Text style={styles.inputLabel}>Developer & Debug Tools:</Text>
+                  <TouchableOpacity
+                    style={styles.inspectHtmlBtn}
+                    onPress={() => {
+                      setShowSettings(false);
+                      setTimeout(() => setShowDebugHtmlModal(true), 200);
+                    }}
+                    activeOpacity={0.8}
+                  >
+                    <CodeBracketIcon size={20} color="#4f46e5" style={{ marginRight: 8 }} />
+                    <Text style={styles.inspectHtmlBtnText}>
+                      {debugCourseHtml || debugDashboardHtml ? '🔍 View Scraped HTML' : '🔍 View Scraped HTML (None Yet)'}
+                    </Text>
+                  </TouchableOpacity>
+                </View>
+
+                <View style={styles.modalButtons}>
+                  <TouchableOpacity style={styles.cancelModalBtn} onPress={() => setShowSettings(false)}><Text style={styles.cancelModalBtnText}>Close</Text></TouchableOpacity>
+                  <TouchableOpacity style={styles.saveModalBtn} onPress={saveTemplates}><Text style={styles.saveModalBtnText}>Save</Text></TouchableOpacity>
+                </View>
+                <View style={styles.dangerZone}>
+                  <TouchableOpacity onPress={handleLogout} style={styles.logoutBtn}><Text style={styles.logoutBtnText}>Logout & Clear Vault</Text></TouchableOpacity>
+                </View>
+              </ScrollView>
+            </View>
+          </View>
+        </Modal>
+
+        {/* --- ✨ COURSE MANAGEMENT MODAL --- */}
+        <Modal visible={showCourseModal} animationType="slide" transparent={true}>
+          <View style={styles.modalOverlay}>
+            <View style={[styles.modalContent, { height: '88%' }]}>
+              {/* Header */}
+              <View style={styles.noteModalHeader}>
+                <View style={{ flex: 1, marginRight: 10 }}>
+                  <Text style={styles.modalTitle}>Manage Course Modules</Text>
+                  <Text style={{ fontSize: 13, color: '#6b7280', marginTop: -15, marginBottom: 10 }}>
+                    Add and manage your Perusall & iCalendar course feeds
+                  </Text>
+                </View>
+                <TouchableOpacity onPress={() => setShowCourseModal(false)} style={styles.trashBtn}>
+                  <XCircleIcon size={26} color="#6b7280" />
                 </TouchableOpacity>
               </View>
 
-              {/* ✨ NEW: Inspect Scraped HTML Button in Settings */}
-              <View style={{ marginBottom: 15 }}>
-                <Text style={styles.inputLabel}>Developer & Debug Tools:</Text>
-                <TouchableOpacity
-                  style={styles.inspectHtmlBtn}
-                  onPress={() => {
-                    setShowSettings(false);
-                    setTimeout(() => setShowDebugHtmlModal(true), 200);
-                  }}
-                  activeOpacity={0.8}
-                >
-                  <CodeBracketIcon size={20} color="#4f46e5" style={{ marginRight: 8 }} />
-                  <Text style={styles.inspectHtmlBtnText}>
-                    {debugCourseHtml || debugDashboardHtml ? '🔍 View Scraped HTML' : '🔍 View Scraped HTML (None Yet)'}
-                  </Text>
-                </TouchableOpacity>
-              </View>
+              <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={{ paddingBottom: 25 }}>
+                {/* Form Card */}
+                <View style={styles.courseFormCard}>
+                  <Text style={styles.inputLabel}>Module Code (e.g., CO423):</Text>
+                  <TextInput
+                    style={styles.input}
+                    value={newModuleCode}
+                    onChangeText={(text) => {
+                      setNewModuleCode(text);
+                      if (courseError) setCourseError('');
+                    }}
+                    placeholder="e.g., CO423"
+                    placeholderTextColor="#9ca3af"
+                    autoCapitalize="characters"
+                  />
 
-              <View style={styles.modalButtons}>
-                <TouchableOpacity style={styles.cancelModalBtn} onPress={() => setShowSettings(false)}><Text style={styles.cancelModalBtnText}>Close</Text></TouchableOpacity>
-                <TouchableOpacity style={styles.saveModalBtn} onPress={saveTemplates}><Text style={styles.saveModalBtnText}>Save</Text></TouchableOpacity>
-              </View>
-              <View style={styles.dangerZone}>
-                <TouchableOpacity onPress={handleLogout} style={styles.logoutBtn}><Text style={styles.logoutBtnText}>Logout & Clear Vault</Text></TouchableOpacity>
-              </View>
+                  <Text style={styles.inputLabel}>Calendar Feed URL:</Text>
+                  <TextInput
+                    style={styles.input}
+                    value={newCalendarUrl}
+                    onChangeText={(text) => {
+                      setNewCalendarUrl(text);
+                      if (courseError) setCourseError('');
+                    }}
+                    placeholder="webcal://app.perusall.com/api/v1/calendar/..."
+                    placeholderTextColor="#9ca3af"
+                    autoCapitalize="none"
+                    autoCorrect={false}
+                  />
+                  <Text style={{ fontSize: 11, color: '#6b7280', marginTop: -14, marginBottom: 12 }}>
+                    webcal:// URLs are automatically converted to https://
+                  </Text>
+
+                  {courseError ? (
+                    <Text style={styles.courseErrorText}>{courseError}</Text>
+                  ) : null}
+
+                  <TouchableOpacity
+                    style={styles.addCourseBtn}
+                    onPress={handleAddCourse}
+                    activeOpacity={0.8}
+                  >
+                    <PlusIcon size={18} color="#fff" style={{ marginRight: 6 }} />
+                    <Text style={styles.addCourseBtnText}>Add Module</Text>
+                  </TouchableOpacity>
+                </View>
+
+                {/* Saved Courses List */}
+                <Text style={[styles.sectionTitle, { marginTop: 15, marginBottom: 12 }]}>
+                  Saved Modules ({savedCourses.length})
+                </Text>
+
+                {savedCourses.length === 0 ? (
+                  <View style={styles.emptyCourseBox}>
+                    <ArchiveBoxIcon size={36} color="#9ca3af" style={{ marginBottom: 8 }} />
+                    <Text style={styles.emptyCourseText}>No course modules added yet.</Text>
+                    <Text style={styles.emptyCourseSubtext}>Add a module above to start syncing its deadlines.</Text>
+                  </View>
+                ) : (
+                  savedCourses.map((course) => (
+                    <View key={course.id} style={styles.courseItemCard}>
+                      <View style={{ flex: 1, marginRight: 10 }}>
+                        <View style={styles.courseBadge}>
+                          <Text style={styles.courseBadgeText}>{course.name || 'Unnamed Module'}</Text>
+                        </View>
+                        <Text style={styles.courseUrlText} numberOfLines={1} ellipsizeMode="middle">
+                          {course.calendarUrl}
+                        </Text>
+                      </View>
+                      <TouchableOpacity
+                        style={styles.deleteCourseBtn}
+                        onPress={() => handleDeleteCourse(course.id)}
+                        activeOpacity={0.7}
+                      >
+                        <TrashIcon size={20} color="#ef4444" />
+                      </TouchableOpacity>
+                    </View>
+                  ))
+                )}
+              </ScrollView>
             </View>
           </View>
         </Modal>
@@ -1553,13 +1835,7 @@ const DashboardScreen = ({ onLogout, navigation }) => {
           />
         </View>
 
-        {/* Headless Perusall LTI Bridge */}
-        {needsPerusallAuth && perusallLtiUrl ? (
-          <PerusallLtiBridge
-            url={perusallLtiUrl}
-            onAuthSuccess={handlePerusallAuthSuccess}
-          />
-        ) : null}
+
       </View>
     </SafeAreaView>
   );
@@ -1677,6 +1953,26 @@ const styles = StyleSheet.create({
   dangerZone: { marginTop: 30, paddingTop: 20, borderTopWidth: 1, borderTopColor: '#f3f4f6' },
   logoutBtn: { backgroundColor: '#fef2f2', padding: 15, borderRadius: 12, alignItems: 'center', borderWidth: 1, borderColor: '#fca5a5' },
   logoutBtnText: { color: '#ef4444', fontWeight: 'bold', fontSize: 16 },
+
+  // ✨ Course Management Styles ✨
+  manageCoursesBtn: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', backgroundColor: '#eef2ff', borderWidth: 1, borderColor: '#c7d2fe', borderRadius: 12, padding: 14, marginBottom: 5 },
+  manageCoursesBtnText: { fontSize: 14, color: '#4338ca', fontWeight: '700' },
+  courseFormCard: { backgroundColor: '#f9fafb', borderWidth: 1, borderColor: '#e5e7eb', borderRadius: 16, padding: 16, marginBottom: 10 },
+  addCourseBtn: { backgroundColor: '#111827', padding: 14, borderRadius: 12, flexDirection: 'row', alignItems: 'center', justifyContent: 'center' },
+  addCourseBtnText: { color: '#fff', fontWeight: 'bold', fontSize: 15 },
+  courseErrorText: { color: '#ef4444', fontSize: 13, marginBottom: 10, fontWeight: '600' },
+  courseItemCard: { backgroundColor: '#fff', borderWidth: 1, borderColor: '#e5e7eb', borderRadius: 14, padding: 14, marginBottom: 10, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', elevation: 1 },
+  courseBadge: { backgroundColor: '#eef2ff', paddingHorizontal: 10, paddingVertical: 4, borderRadius: 8, alignSelf: 'flex-start', marginBottom: 4 },
+  courseBadgeText: { color: '#4338ca', fontWeight: 'bold', fontSize: 13 },
+  courseUrlText: { color: '#6b7280', fontSize: 12 },
+  deleteCourseBtn: { padding: 8, borderRadius: 8, backgroundColor: '#fef2f2' },
+  emptyCourseBox: { padding: 20, backgroundColor: '#f9fafb', borderRadius: 14, alignItems: 'center', justifyContent: 'center', borderWidth: 1, borderColor: '#e5e7eb', borderStyle: 'dashed' },
+  emptyCourseText: { color: '#374151', fontWeight: 'bold', fontSize: 14 },
+  emptyCourseSubtext: { color: '#9ca3af', fontSize: 12, textAlign: 'center', marginTop: 4 },
+  courseModuleBadge: { backgroundColor: '#e0e7ff', borderColor: '#c7d2fe', borderWidth: 1, flexDirection: 'row', alignItems: 'center' },
+  courseModuleBadgeText: { color: '#3730a3', fontWeight: 'bold' },
+  emptyStateActionBtn: { flexDirection: 'row', alignItems: 'center', backgroundColor: '#111827', paddingVertical: 12, paddingHorizontal: 20, borderRadius: 12, marginTop: 12 },
+  emptyStateActionBtnText: { color: '#fff', fontSize: 14, fontWeight: 'bold' },
 });
 
 export default DashboardScreen;
