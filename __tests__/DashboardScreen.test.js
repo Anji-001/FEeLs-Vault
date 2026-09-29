@@ -1,5 +1,5 @@
 import React from 'react';
-import { render, fireEvent, waitFor } from '@testing-library/react-native';
+import { render, fireEvent, waitFor, act } from '@testing-library/react-native';
 import DashboardScreen from '../src/screens/DashboardScreen';
 import * as Keychain from 'react-native-keychain';
 import AsyncStorage from '@react-native-async-storage/async-storage';
@@ -52,7 +52,13 @@ jest.mock('react-native-gesture-handler', () => {
   const React = require('react');
   const { View } = require('react-native');
   return {
-    Swipeable: ({ children }) => React.createElement(View, null, children),
+    Swipeable: ({ children, renderRightActions }) =>
+      React.createElement(
+        View,
+        null,
+        children,
+        renderRightActions ? renderRightActions() : null
+      ),
   };
 });
 
@@ -107,7 +113,7 @@ describe('DashboardScreen WebView Integration', () => {
           <h1>CO544 Machine Learning</h1>
           <div class="activity-item">
             <span class="instancename">Neural Networks Assignment 1</span>
-            <div class="activity-dates">Due: Friday, 25 September 2026, 11:59 PM</div>
+            <div class="activity-dates">Due: Friday, 25 October 2026, 11:59 PM</div>
           </div>
         </body>
       </html>
@@ -184,6 +190,167 @@ describe('DashboardScreen WebView Integration', () => {
 
     const offlineTask = await findByText('Offline Cached Lab 1');
     expect(offlineTask).toBeTruthy();
+  });
+
+  test('displays Undo button on delete and auto-hides after 4000ms', async () => {
+    jest.useFakeTimers();
+    const mockOnLogout = jest.fn();
+    const mockNavigation = { navigate: jest.fn() };
+
+    const initialTasks = [
+      {
+        id: 'task-to-delete',
+        subject: 'CO322',
+        description: 'Task To Delete',
+        deadline: '10/15/2026 11:59 PM',
+        remaining: '24 days 5 hours',
+        isLocked: false,
+        lockReason: '',
+        source: 'custom',
+      },
+    ];
+
+    await AsyncStorage.setItem('@custom_deadlines', JSON.stringify(initialTasks));
+
+    const { findByText, queryByText, getByText } = render(
+      <DashboardScreen onLogout={mockOnLogout} navigation={mockNavigation} />
+    );
+
+    const taskText = await findByText('Task To Delete');
+    expect(taskText).toBeTruthy();
+
+    // Click the delete button rendered in swipe action
+    const deleteBtn = getByText('Delete');
+    fireEvent.press(deleteBtn);
+
+    // Undo banner should be visible immediately
+    expect(getByText('UNDO')).toBeTruthy();
+    expect(getByText('Task deleted')).toBeTruthy();
+
+    // Fast-forward 3999ms - should still be visible
+    act(() => {
+      jest.advanceTimersByTime(3999);
+    });
+    expect(queryByText('UNDO')).toBeTruthy();
+
+    // Advance 1ms more to hit 4000ms
+    act(() => {
+      jest.advanceTimersByTime(1);
+    });
+    expect(queryByText('UNDO')).toBeNull();
+
+    jest.useRealTimers();
+  });
+
+  test('deleting a Perusall deadline persists deletion to @hidden_perusall_tasks and prevents reappearance', async () => {
+    const mockOnLogout = jest.fn();
+    const mockNavigation = { navigate: jest.fn() };
+
+    // Setup a mock course feed with a Perusall deadline
+    const initialSavedCourses = [
+      {
+        id: 'c-perusall-1',
+        name: 'CO544',
+        calendarUrl: 'https://app.perusall.com/api/v1/calendar/feed.ics',
+      },
+    ];
+    await AsyncStorage.setItem('SAVED_COURSES', JSON.stringify(initialSavedCourses));
+
+    const mockIcs = `BEGIN:VCALENDAR
+VERSION:2.0
+PRODID:-//Perusall//Calendar//EN
+BEGIN:VEVENT
+UID:perusall-uid-assignment-123
+SUMMARY:Perusall Chapter 1 Reading
+DESCRIPTION:Please read Chapter 1
+DTEND:20261015T182900Z
+END:VEVENT
+END:VCALENDAR`;
+
+    global.fetch = jest.fn().mockResolvedValue({
+      ok: true,
+      text: () => Promise.resolve(mockIcs),
+    });
+
+    const { findByText, getByText, queryByText } = render(
+      <DashboardScreen onLogout={mockOnLogout} navigation={mockNavigation} />
+    );
+
+    // Verify the Perusall deadline is initially fetched and rendered
+    const taskText = await findByText('Perusall Chapter 1 Reading');
+    expect(taskText).toBeTruthy();
+
+    // Delete the Perusall deadline
+    const deleteBtn = getByText('Delete');
+    await act(async () => {
+      fireEvent.press(deleteBtn);
+    });
+
+    // Verify it is removed from UI
+    expect(queryByText('Perusall Chapter 1 Reading')).toBeNull();
+
+    // Verify it was blacklisted in @hidden_perusall_tasks in AsyncStorage
+    await waitFor(async () => {
+      const hiddenTasksStr = await AsyncStorage.getItem('@hidden_perusall_tasks');
+      expect(hiddenTasksStr).toBeTruthy();
+      const hiddenTasks = JSON.parse(hiddenTasksStr);
+      expect(hiddenTasks).toContain('perusall-uid-assignment-123');
+      expect(hiddenTasks).toContain('CO544-Perusall Chapter 1 Reading');
+    });
+  });
+
+  test('saving settings preserves Perusall course module deadlines', async () => {
+    const mockOnLogout = jest.fn();
+    const mockNavigation = { navigate: jest.fn() };
+
+    const initialSavedCourses = [
+      {
+        id: 'c-perusall-2',
+        name: 'CO544',
+        calendarUrl: 'https://app.perusall.com/api/v1/calendar/feed.ics',
+      },
+    ];
+    await AsyncStorage.setItem('SAVED_COURSES', JSON.stringify(initialSavedCourses));
+
+    const mockIcs = `BEGIN:VCALENDAR
+VERSION:2.0
+PRODID:-//Perusall//Calendar//EN
+BEGIN:VEVENT
+UID:perusall-uid-preserved
+SUMMARY:Preserved Chapter 2 Reading
+DESCRIPTION:Please read Chapter 2
+DTEND:20261020T182900Z
+END:VEVENT
+END:VCALENDAR`;
+
+    global.fetch = jest.fn().mockResolvedValue({
+      ok: true,
+      text: () => Promise.resolve(mockIcs),
+    });
+
+    const { findByText, getByText, getByTestId } = render(
+      <DashboardScreen onLogout={mockOnLogout} navigation={mockNavigation} />
+    );
+
+    // Initial render
+    const taskText = await findByText('Preserved Chapter 2 Reading');
+    expect(taskText).toBeTruthy();
+
+    // Open settings modal
+    const settingsBtn = getByTestId('settings-button');
+    await act(async () => {
+      fireEvent.press(settingsBtn);
+    });
+
+    // Click settings Save button
+    const saveSettingsBtn = getByText('Save');
+    await act(async () => {
+      fireEvent.press(saveSettingsBtn);
+    });
+
+    // Verify task is still present after saving settings
+    const taskAfterSave = await findByText('Preserved Chapter 2 Reading');
+    expect(taskAfterSave).toBeTruthy();
   });
 });
 

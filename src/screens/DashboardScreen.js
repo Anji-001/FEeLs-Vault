@@ -45,7 +45,19 @@ const DEFAULT_HEADER = "*UPCOMING DEADLINES:*";
 const DEFAULT_ITEM = "*[{subject}]* _{desc}_\n*Due:* {date}\n*Left:* {left}";
 const STORAGE_CUSTOM_DEADLINES = '@custom_deadlines';
 const STORAGE_CACHED_FEELS = '@cached_feels_deadlines';
+const STORAGE_HIDDEN_FEELS = '@hidden_feels_tasks';
+const STORAGE_HIDDEN_PERUSALL = '@hidden_perusall_tasks';
 const DEADLINE_FILTERS = ['Assignments', 'Quizzes', 'Labs', 'Perusall', 'Other'];
+
+const filterHiddenPerusallDeadlines = (items, hiddenList) => {
+  if (!Array.isArray(items)) return [];
+  if (!Array.isArray(hiddenList) || hiddenList.length === 0) return items;
+  return items.filter((item) => {
+    const sig = `${item.courseName || item.subject || ''}-${item.title || item.description || ''}`;
+    const id = item.id ? String(item.id) : null;
+    return !hiddenList.includes(sig) && (!id || !hiddenList.includes(id));
+  });
+};
 
 const formatPerusallDate = (d) => {
   if (!d) return 'Unknown Date';
@@ -264,6 +276,17 @@ const DashboardScreen = ({ onLogout, navigation }) => {
     };
   }, []);
 
+  // Auto-hide Undo banner after 4 seconds and finalize deletion
+  useEffect(() => {
+    if (lastDeleted) {
+      const timer = setTimeout(() => {
+        setLastDeleted(null);
+      }, 4000);
+
+      return () => clearTimeout(timer);
+    }
+  }, [lastDeleted]);
+
   useEffect(() => {
     const loadData = async () => {
       // (Keep your existing Keychain and notification permission code here)
@@ -273,7 +296,7 @@ const DashboardScreen = ({ onLogout, navigation }) => {
 
       // Load saved templates and notes
       try {
-        const [savedHeader, savedItem, savedOffset, savedDivider, savedNotes, savedSemesterStr, savedPerusallUrl] = await Promise.all([
+        const [savedHeader, savedItem, savedOffset, savedDivider, savedNotes, savedSemesterStr, savedPerusallUrl, savedHiddenPerusall] = await Promise.all([
           AsyncStorage.getItem('@header_template'),
           AsyncStorage.getItem('@item_template'),
           AsyncStorage.getItem('@reminder_offset'),
@@ -281,6 +304,7 @@ const DashboardScreen = ({ onLogout, navigation }) => {
           AsyncStorage.getItem('@saved_notes'),
           AsyncStorage.getItem('@selected_semester'),
           AsyncStorage.getItem(STORAGE_PERUSALL_CALENDAR_URL),
+          AsyncStorage.getItem(STORAGE_HIDDEN_PERUSALL),
         ]);
 
         if (savedHeader) setHeaderTemplate(savedHeader);
@@ -288,6 +312,8 @@ const DashboardScreen = ({ onLogout, navigation }) => {
         if (savedOffset) setReminderOffset(savedOffset);
         if (savedDivider) setDividerTemplate(savedDivider);
         if (savedPerusallUrl) setPerusallCalendarUrl(savedPerusallUrl);
+
+        const initialHiddenPList = savedHiddenPerusall ? JSON.parse(savedHiddenPerusall) : [];
 
         // Load saved multi-courses
         const storedCourses = await getCourses();
@@ -298,10 +324,13 @@ const DashboardScreen = ({ onLogout, navigation }) => {
         if (coursesToFetch) {
           setIsPerusallLoading(true);
           fetchPerusallDeadlines(coursesToFetch)
-            .then((pItems) => {
-              setPerusallDeadlines(pItems || []);
+            .then(async (pItems) => {
+              const freshHiddenStr = await AsyncStorage.getItem(STORAGE_HIDDEN_PERUSALL);
+              const currentHiddenList = freshHiddenStr ? JSON.parse(freshHiddenStr) : initialHiddenPList;
+              const filteredP = filterHiddenPerusallDeadlines(pItems || [], currentHiddenList);
+              setPerusallDeadlines(filteredP);
               setIsPerusallLoading(false);
-              const normP = normalizePerusallDeadlines(pItems || []);
+              const normP = normalizePerusallDeadlines(filteredP);
               setDeadlines((prev) => {
                 const nonP = prev.filter((d) => d.source !== 'perusall');
                 const combined = [...nonP, ...normP];
@@ -376,8 +405,11 @@ const DashboardScreen = ({ onLogout, navigation }) => {
       if (courses.length > 0) {
         setIsPerusallLoading(true);
         const pDeadlines = await fetchPerusallDeadlines(courses);
-        setPerusallDeadlines(pDeadlines || []);
-        const normP = normalizePerusallDeadlines(pDeadlines || []);
+        const savedHiddenPerusall = await AsyncStorage.getItem(STORAGE_HIDDEN_PERUSALL);
+        const hiddenPList = savedHiddenPerusall ? JSON.parse(savedHiddenPerusall) : [];
+        const filteredP = filterHiddenPerusallDeadlines(pDeadlines || [], hiddenPList);
+        setPerusallDeadlines(filteredP);
+        const normP = normalizePerusallDeadlines(filteredP);
         setDeadlines((prev) => {
           const nonP = prev.filter((d) => d.source !== 'perusall');
           const combined = [...nonP, ...normP];
@@ -438,13 +470,21 @@ const DashboardScreen = ({ onLogout, navigation }) => {
     const cleanedPerusall = await savePerusallCalendarUrl(perusallCalendarUrl);
     setPerusallCalendarUrl(cleanedPerusall);
 
-    if (cleanedPerusall) {
+    const storedCourses = await getCourses();
+    setSavedCourses(storedCourses);
+
+    const coursesToFetch = storedCourses.length > 0 ? storedCourses : (cleanedPerusall ? cleanedPerusall : null);
+
+    if (coursesToFetch) {
       setIsPerusallLoading(true);
-      fetchPerusallDeadlines(cleanedPerusall)
-        .then((pItems) => {
-          setPerusallDeadlines(pItems || []);
+      fetchPerusallDeadlines(coursesToFetch)
+        .then(async (pItems) => {
+          const savedHiddenPerusall = await AsyncStorage.getItem(STORAGE_HIDDEN_PERUSALL);
+          const hiddenPList = savedHiddenPerusall ? JSON.parse(savedHiddenPerusall) : [];
+          const filteredP = filterHiddenPerusallDeadlines(pItems || [], hiddenPList);
+          setPerusallDeadlines(filteredP);
           setIsPerusallLoading(false);
-          const normP = normalizePerusallDeadlines(pItems || []);
+          const normP = normalizePerusallDeadlines(filteredP);
           setDeadlines((prev) => {
             const nonP = prev.filter((d) => d.source !== 'perusall');
             const combined = [...nonP, ...normP];
@@ -592,6 +632,7 @@ const DashboardScreen = ({ onLogout, navigation }) => {
 
   const handleRemoveDeadline = (indexToRemove) => {
     const itemToDelete = deadlines[indexToRemove];
+    if (!itemToDelete) return;
     const ref = rowRefs.current.get(itemToDelete?.id) || rowRefs.current.get(indexToRemove);
     if (ref) ref.close();
     cancelAlarm(itemToDelete.subject, itemToDelete.deadline).catch(e => { });
@@ -601,18 +642,28 @@ const DashboardScreen = ({ onLogout, navigation }) => {
     if (itemToDelete?.source === 'custom') {
       removeCustomDeadline(itemToDelete.id);
     } else {
-      // If it's a FEeLS task, blacklist it so it doesn't reappear on next sync
+      // If it's a FEeLS or Perusall task, blacklist it so it doesn't reappear on next sync / restart
       addToBlacklist(itemToDelete);
     }
   };
 
   const removeFromBlacklist = async (item) => {
+    if (!item) return;
     try {
-      const savedStr = await AsyncStorage.getItem('@hidden_feels_tasks');
-      const hiddenList = savedStr ? JSON.parse(savedStr) : [];
-      const signature = `${item.subject}-${item.description}`;
-      const updatedList = hiddenList.filter(sig => sig !== signature);
-      await AsyncStorage.setItem('@hidden_feels_tasks', JSON.stringify(updatedList));
+      if (item.source === 'feels') {
+        const savedStr = await AsyncStorage.getItem(STORAGE_HIDDEN_FEELS);
+        const hiddenList = savedStr ? JSON.parse(savedStr) : [];
+        const signature = `${item.subject}-${item.description}`;
+        const updatedList = hiddenList.filter(sig => sig !== signature);
+        await AsyncStorage.setItem(STORAGE_HIDDEN_FEELS, JSON.stringify(updatedList));
+      } else if (item.source === 'perusall') {
+        const savedStr = await AsyncStorage.getItem(STORAGE_HIDDEN_PERUSALL);
+        const hiddenList = savedStr ? JSON.parse(savedStr) : [];
+        const signature = `${item.courseName || item.subject || ''}-${item.title || item.description || ''}`;
+        const taskId = item.id ? String(item.id) : null;
+        const updatedList = hiddenList.filter(entry => entry !== signature && entry !== taskId);
+        await AsyncStorage.setItem(STORAGE_HIDDEN_PERUSALL, JSON.stringify(updatedList));
+      }
     } catch (error) {
       console.error('Error removing task from blacklist', error);
     }
@@ -631,6 +682,9 @@ const DashboardScreen = ({ onLogout, navigation }) => {
       } else if (lastDeleted.item?.source === 'feels') {
         // Remove from blacklist so the task survives an app restart
         await removeFromBlacklist(lastDeleted.item);
+      } else if (lastDeleted.item?.source === 'perusall') {
+        await removeFromBlacklist(lastDeleted.item);
+        setPerusallDeadlines(prev => [...prev, lastDeleted.item]);
       }
       setLastDeleted(null);
     }
@@ -695,8 +749,8 @@ const DashboardScreen = ({ onLogout, navigation }) => {
       const oldItem = deadlines[editingIndex];
       await cancelAlarm(oldItem.subject, oldItem.deadline);
 
-      // ✨ NEW: Blacklist the old FEeLS version so it doesn't duplicate
-      if (oldItem?.source === 'feels') {
+      // ✨ Blacklist the old FEeLS or Perusall version so it doesn't duplicate
+      if (oldItem?.source === 'feels' || oldItem?.source === 'perusall') {
         await addToBlacklist(oldItem);
       }
 
@@ -748,9 +802,12 @@ const DashboardScreen = ({ onLogout, navigation }) => {
     const coursesToRefresh = savedCourses.length > 0 ? savedCourses : (perusallCalendarUrl ? perusallCalendarUrl : null);
     if (coursesToRefresh) {
       fetchPerusallDeadlines(coursesToRefresh)
-        .then((pItems) => {
-          setPerusallDeadlines(pItems || []);
-          const normP = normalizePerusallDeadlines(pItems || []);
+        .then(async (pItems) => {
+          const savedHiddenPerusall = await AsyncStorage.getItem(STORAGE_HIDDEN_PERUSALL);
+          const hiddenPList = savedHiddenPerusall ? JSON.parse(savedHiddenPerusall) : [];
+          const filteredP = filterHiddenPerusallDeadlines(pItems || [], hiddenPList);
+          setPerusallDeadlines(filteredP);
+          const normP = normalizePerusallDeadlines(filteredP);
           setDeadlines((prev) => {
             const nonP = prev.filter((d) => d.source !== 'perusall');
             const combined = [...nonP, ...normP];
@@ -842,13 +899,15 @@ const DashboardScreen = ({ onLogout, navigation }) => {
         }
 
         // Parse activities across all fetched course pages
-        const [savedCustomStr, savedHiddenStr] = await Promise.all([
+        const [savedCustomStr, savedHiddenStr, savedHiddenPerusallStr] = await Promise.all([
           AsyncStorage.getItem(STORAGE_CUSTOM_DEADLINES),
-          AsyncStorage.getItem('@hidden_feels_tasks')
+          AsyncStorage.getItem(STORAGE_HIDDEN_FEELS),
+          AsyncStorage.getItem(STORAGE_HIDDEN_PERUSALL),
         ]);
 
         const customDeadlines = normalizeCustomDeadlines(savedCustomStr ? JSON.parse(savedCustomStr) : []);
         const hiddenList = savedHiddenStr ? JSON.parse(savedHiddenStr) : [];
+        const hiddenPerusallList = savedHiddenPerusallStr ? JSON.parse(savedHiddenPerusallStr) : [];
 
         const structuredData = parseAllCoursePages(eventData.coursePages || []);
 
@@ -872,7 +931,8 @@ const DashboardScreen = ({ onLogout, navigation }) => {
 
         await AsyncStorage.setItem(STORAGE_CACHED_FEELS, JSON.stringify(syncedDeadlines));
 
-        const normPerusall = normalizePerusallDeadlines(perusallDeadlines);
+        const filteredPerusall = filterHiddenPerusallDeadlines(perusallDeadlines, hiddenPerusallList);
+        const normPerusall = normalizePerusallDeadlines(filteredPerusall);
         const combinedData = [...syncedDeadlines, ...customDeadlines, ...normPerusall];
         if (combinedData.length > 0) {
           combinedData.sort((a, b) => {
@@ -902,13 +962,15 @@ const DashboardScreen = ({ onLogout, navigation }) => {
       if (parsed.type === 'SCRAPED_DATA') {
 
         // 1. FETCH CUSTOM DEADLINES AND THE BLACKLIST
-        const [savedCustomStr, savedHiddenStr] = await Promise.all([
+        const [savedCustomStr, savedHiddenStr, savedHiddenPerusallStr] = await Promise.all([
           AsyncStorage.getItem(STORAGE_CUSTOM_DEADLINES),
-          AsyncStorage.getItem('@hidden_feels_tasks')
+          AsyncStorage.getItem(STORAGE_HIDDEN_FEELS),
+          AsyncStorage.getItem(STORAGE_HIDDEN_PERUSALL),
         ]);
 
         const customDeadlines = normalizeCustomDeadlines(savedCustomStr ? JSON.parse(savedCustomStr) : []);
         const hiddenList = savedHiddenStr ? JSON.parse(savedHiddenStr) : [];
+        const hiddenPerusallList = savedHiddenPerusallStr ? JSON.parse(savedHiddenPerusallStr) : [];
 
         const rawArray = parsed.data || [];
         const feelsStructuredData = rawArray.map(item => parseDeadlineString(item));
@@ -933,8 +995,10 @@ const DashboardScreen = ({ onLogout, navigation }) => {
 
         await AsyncStorage.setItem(STORAGE_CACHED_FEELS, JSON.stringify(syncedDeadlines));
 
-        // 4. COMBINE SCRAPED DATA WITH CUSTOM DATA
-        const combinedData = [...syncedDeadlines, ...customDeadlines];
+        // 4. COMBINE SCRAPED DATA WITH CUSTOM DATA AND PERUSALL
+        const filteredPerusall = filterHiddenPerusallDeadlines(perusallDeadlines, hiddenPerusallList);
+        const normPerusall = normalizePerusallDeadlines(filteredPerusall);
+        const combinedData = [...syncedDeadlines, ...customDeadlines, ...normPerusall];
 
         // 5. Sort and display
         if (combinedData.length > 0) {
@@ -1022,10 +1086,10 @@ const DashboardScreen = ({ onLogout, navigation }) => {
 
   // ✨ NEW: The Blacklist Function ✨
   const addToBlacklist = async (item) => {
-    // We only need to blacklist tasks that originally came from the FEeLS scraper
-    if (item?.source === 'feels') {
-      try {
-        const savedStr = await AsyncStorage.getItem('@hidden_feels_tasks');
+    if (!item) return;
+    try {
+      if (item.source === 'feels') {
+        const savedStr = await AsyncStorage.getItem(STORAGE_HIDDEN_FEELS);
         const hiddenList = savedStr ? JSON.parse(savedStr) : [];
 
         // Create a unique fingerprint based on the original subject and description
@@ -1033,11 +1097,29 @@ const DashboardScreen = ({ onLogout, navigation }) => {
 
         if (!hiddenList.includes(taskSignature)) {
           hiddenList.push(taskSignature);
-          await AsyncStorage.setItem('@hidden_feels_tasks', JSON.stringify(hiddenList));
+          await AsyncStorage.setItem(STORAGE_HIDDEN_FEELS, JSON.stringify(hiddenList));
         }
-      } catch (error) {
-        console.error('Error blacklisting task', error);
+      } else if (item.source === 'perusall') {
+        const savedStr = await AsyncStorage.getItem(STORAGE_HIDDEN_PERUSALL);
+        const hiddenList = savedStr ? JSON.parse(savedStr) : [];
+        const taskSignature = `${item.courseName || item.subject || ''}-${item.title || item.description || ''}`;
+        const taskId = item.id ? String(item.id) : null;
+        let modified = false;
+        if (taskSignature && !hiddenList.includes(taskSignature)) {
+          hiddenList.push(taskSignature);
+          modified = true;
+        }
+        if (taskId && !hiddenList.includes(taskId)) {
+          hiddenList.push(taskId);
+          modified = true;
+        }
+        if (modified) {
+          await AsyncStorage.setItem(STORAGE_HIDDEN_PERUSALL, JSON.stringify(hiddenList));
+        }
+        setPerusallDeadlines((prev) => filterHiddenPerusallDeadlines(prev, hiddenList));
       }
+    } catch (error) {
+      console.error('Error blacklisting task', error);
     }
   };
 
@@ -1054,7 +1136,7 @@ const DashboardScreen = ({ onLogout, navigation }) => {
           <View style={styles.headerButtons}>
             <TouchableOpacity onPress={handleShare} style={styles.iconBtn}><ShareIcon size={28} color="#111827" /></TouchableOpacity>
             <TouchableOpacity onPress={() => navigation.navigate('ToDo')} style={styles.iconBtn}><CheckCircleIcon size={28} color="#111827" /></TouchableOpacity>
-            <TouchableOpacity onPress={() => setShowSettings(true)} style={styles.iconBtn}><Cog6ToothIcon size={30} color="#111827" /></TouchableOpacity>
+            <TouchableOpacity testID="settings-button" onPress={() => setShowSettings(true)} style={styles.iconBtn}><Cog6ToothIcon size={30} color="#111827" /></TouchableOpacity>
           </View>
         </View>
 
